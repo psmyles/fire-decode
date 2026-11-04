@@ -230,9 +230,11 @@ The merge takes:
   - It runs **after** any `fit`, so a thumbnail narrows 256 px rather than 8K.
 
 The buffer and the file are described separately:
-- `DecodedImage::format` describes the **buffer**. (Today `bit_depth` describes the buffer.)
+- `DecodedImage::format` describes the **buffer**. (Today `bit_depth` mostly describes the buffer;
+  PNG and DDS already report the file's own depth.)
 - A separate **`source`** describes the **file**:
-  - channels, bit depth (8/10/12/16/32), sample kind and format name;
+  - channels, bit depth (1/2/4 for low-depth and palette PNGs, otherwise 8/10/12/16/32), whether it
+    is a palette image, sample kind and format name;
   - for colour-tagged sources such as HEIF, the **transfer** (sRGB / linear / PQ / HLG), the
     **primaries** (BT.709 / Display P3 / BT.2020 / other) and the **HDR kind** (none / PQ / HLG / gain
     map).
@@ -386,7 +388,15 @@ The decision:
 - **New variants:**
   - **`Unsupported(Format)`** - a format compiled out of this build;
   - **`Cancelled`** - a decode cancelled through `DecodeCtl` (FD16);
-  - **`Panicked`** (FD7).
+  - **`Panicked`** (FD7);
+  - **`NoMergedImage`** - a PSD saved without Maximize Compatibility.
+- **`NoMergedImage` is already in fire's tree** (fire's PLAN.md A1, for Asset Check's
+  `texture.psd_composite`). It was added on its own, ahead of the rest: `Unsupported(Format)` needs
+  the public `Format` (FD9), which doesn't exist yet.
+  - It covers two cases. One is psd_sdk finding no image data section. The other is the one
+    Photoshop writes: a **white placeholder** merged image, marked only by `hasRealMergedData = 0`
+    in the Version Info resource (1057). fire-decode reads that flag before psd_sdk runs.
+  - The placeholder decodes cleanly, so without the flag it showed as a white canvas.
 - **`TooLarge` keeps its meaning:** a refusal, never retried by a second decoder. It is also what a HEIF
   over the setup's limits returns, before libheif allocates the image.
 - **bite retries a failed file through ImageMagick on any error except `TooLarge`.**
@@ -724,8 +734,8 @@ decoding pixels, for every format the crate decodes.
 ### FD20 - Static CRT on Windows
 
 The HEIF stack and psd_sdk are C++. Built against the DLL runtime, they need `MSVCP140.dll`.
-- `fire.exe` and `3d-review.exe` already import it, and no installer ships the redistributable: they
-  rely on it being installed.
+- `fire.exe`, `fire-cli.exe` (Asset Check's image checker, in fire's workspace) and `3d-review.exe`
+  already import it, and no installer ships the redistributable: they rely on it being installed.
 - `bite-gui.exe` and `review_shell.dll` import only `VCRUNTIME140` today, so the crate would add the
   dependency to both.
 
@@ -765,6 +775,7 @@ pub fn decode_with_progress(bytes: &[u8], ext_hint: Option<&str>, opts: &DecodeO
                             ctl: &DecodeCtl) -> Result<DecodedImage, DecodeError>;
 pub fn decode_path(path: &Path, opts: &DecodeOptions) -> Result<DecodedImage, DecodeError>;
 pub fn level_dims(w: u32, h: u32, level: u32) -> (u32, u32);
+#[cfg(feature = "icc")] pub fn icc_is_srgb(profile: &[u8]) -> bool;  // already in fire's tree
 
 pub struct DecodeCtl<'a> {
     pub progress: &'a (dyn Fn(f32) + Sync),  // monotonic; may be called from libheif's threads
@@ -801,6 +812,7 @@ pub struct DecodedImage {
 
 pub struct SourceInfo {
     pub format: Format, pub channels: u8, pub bit_depth: u8,
+    pub palette: bool,                 // today DecodedImage::palette; PNG only so far
     pub sample: Sample,                // Unorm | Float
     pub transfer: Transfer,            // Srgb | Linear | Pq | Hlg | Unknown
     pub primaries: Primaries,          // Bt709 | DisplayP3 | Bt2020 | Other
@@ -810,7 +822,7 @@ pub struct SourceInfo {
 pub struct Probe { pub width: u32, pub height: u32, pub format: Format }
 
 pub enum DecodeError { Malformed(String), TooLarge(String), Ffi(String),
-                       Unsupported(Format), Cancelled, Panicked, Other(String) }
+                       Unsupported(Format), Cancelled, Panicked, NoMergedImage, Other(String) }
 
 #[cfg(feature = "psd")]
 pub use psd_layers::{PsdLayers, LayerInfo, LayerCtl, LayerImage, LayerError, BlendMode, Rect};
@@ -828,7 +840,7 @@ Each step lands only when its gate passes.
 | Step | Work | Gate |
 | --- | --- | --- |
 | 0 | **Baselines and fixtures; nothing moves.** The only code change is `links = "fire_psd"` in 3D Review's `crates/psd` (FD3). Record: fire TTFP per format, HEIC / AVIF included. 3D Review: size and import table of `3d-review.exe`, `review_shell.dll` and `libreview_quicklook.dylib`, plus its startup gate. bite: cold and warm import by format, counting `magick` processes, over a rebuilt corpus (`test_images` now holds only GUI goldens). Build HEIF fixtures: 8 / 10 / 12-bit, iPhone grid, portrait (`irot`), PQ, HLG, Apple and ISO gain maps, an infinitely looping `avis`, a sequence-only file, Display P3 nclx without ICC, `meta` after `mdat`, malformed and oversized files | Numbers and fixtures recorded |
-| 1 | **Extraction and the re-vendored stack.** `git filter-repo` of `fire-decode`, `psd-sdk-sys` and `heif-sys`: history kept, vendored HEIF binaries dropped (FD16). The re-vendored stack committed once (newest, one baseline, `/MT`, macOS 11). Committed bindings for both bridges, target guards, and `links = "fire_psd"`. Licence files, LGPL texts, relink section, and a release carrying the source tarballs (FD14). Repo made public. fire moves to `crt-static` (FD20) and to the tag | fire's tests pass. TTFP within 2% per format, HEIC / AVIF included. fire-shellext thumbnails a HEIC. An AVIF decodes on both targets (dav1d linked). `minos` is 11.0. `fire.exe` and `fire_shellext.dll` import no `MSVCP140` / `VCRUNTIME140*` |
+| 1 | **Extraction and the re-vendored stack.** `git filter-repo` of `fire-decode`, `psd-sdk-sys` and `heif-sys`: history kept, vendored HEIF binaries dropped (FD16). The re-vendored stack committed once (newest, one baseline, `/MT`, macOS 11). Committed bindings for both bridges, target guards, and `links = "fire_psd"`. Licence files, LGPL texts, relink section, and a release carrying the source tarballs (FD14). Repo made public. fire moves to `crt-static` (FD20) and to the tag | fire's tests pass. TTFP within 2% per format, HEIC / AVIF included. fire-shellext thumbnails a HEIC. An AVIF decodes on both targets (dav1d linked). `minos` is 11.0. `fire.exe`, `fire-cli.exe` and `fire_shellext.dll` import no `MSVCP140` / `VCRUNTIME140*` |
 | 2a | **PSD merge (FD3).** Both patch sets, fire's wrapper speed work, 3D Review's borrowed bytes and fallible allocation, the Rust ICC scan, limits from Rust. 3D Review's PSD suites are ported into the crate | Both apps' PSD suites and malformed files pass. fire TTFP on PSDs |
 | 2b | **HEIF wrapper v2 (FD16).** C++ with a versioned ABI: limits, thread counts (from today's `thread_budget()` until step 3), progress / cancel hooks, Rust-allocated buffer, init once, size guard, first frame of sequence-only files. Measure libheif's SDR output for PQ / HLG files | Malformed / oversized files return errors, never abort. Fixtures correct: bit depths, grid, portrait, sequence-only. Observed threads within the budget. fire TTFP on HEIC / AVIF |
 | 3 | **API changes.** Named setups with `limits`. `output`, `source`, `hdr` (only `Sdr` implemented), `fit`, `frames`, `truncated`. `sniff` / `probe` / both extension lists. The process-wide budget (libheif included), panic guard and abort check, `DecodeCtl`, cargo features. fire moves to `viewer()`, and fire-shellext to its SDR first-frame setup | fire TTFP. Per-format bench against the previous tag. Extension tests pass under every CI feature set. `probe()` dimensions equal `decode()` dimensions over the corpus |
