@@ -8,9 +8,9 @@
   - Launcher has the results table, window `--set` and the window's exit code, in its `main`. On
     Windows a real `pre-commit` hook waited for the window and got the artist's choice.
 - **Step 4, the rules repo, is next.** Step 0's spikes are still open:
-  - S1 is partly answered: from Fork too, the hook waits for the window. Fork's error dialog after
-    Don't commit changed AC3 and AC4.
-  - S1's other questions should be answered before step 4 is finished.
+  - S1 is mostly answered. From Fork too, the hook waits for the window, the window comes to the
+    front, and both choices reach git. Fork's error dialog after Don't commit changed AC3 and AC4.
+  - S1's last questions (Fork's ✕, PATH, a long wait) should be answered before step 4 is finished.
 - **Where the build differs from this design,** the sections below now describe what was built:
   run-level findings (AC10), the Launcher syntax (AC14), the cache key and staged copies (AC15).
 
@@ -636,8 +636,11 @@ Each step lands only when its gate passes.
     - At the git level (checked 5 November 2026 with `git commit` from a terminal): git's `sh` waits for
       a GUI-subsystem program, and its exit code reaches the hook. 1 stopped the commit and 0 let it
       through. Then confirmed with Launcher itself and the stand-in window (step 3's gate).
-    - **From Fork** (5 November 2026, the stand-in window in a scratch repository): the window opened
-      with its findings, and closing it stopped the commit.
+    - **From Fork** (5 November 2026, the stand-in window in a scratch repository): closing the window
+      stopped the commit, and **Commit anyway** let it through.
+  - **The window comes to the front over Fork by itself.** No taskbar flashing is needed.
+  - **While the hook waits, Fork shows a "Commit 1 file" progress item** in its toolbar, with a spinner
+    and a ✕. Its own Commit button is greyed out.
   - **When the hook exits 1, Fork shows a "Git Error" dialog:** "An unexpected error occurred while
     performing the git request", then the `git commit` command line and the hook's output. Below
     them is a **Skip pre-commit hooks and commit** button. This changes the design in two places:
@@ -646,9 +649,9 @@ Each step lands only when its gate passes.
     - **Fork offers a one-click way past the hook.** In advise mode that's the same as Commit anyway.
       In enforce mode it's a bypass, so the required GitHub check (AC18, step 8) matters (AC3).
   - Still to check from Fork:
-    - whether the window comes to the front over Fork by itself;
-    - what Fork shows while the hook waits;
-    - **Commit anyway** (exit 0) going through;
+    - **what the ✕ on Fork's progress item does** while the window is open. If it kills git and the
+      hook's `sh` but leaves the window open, a later click in the window does nothing useful. The
+      hook could then close the window when it's interrupted;
     - which PATH the hook gets;
     - how long a hook can take before Fork complains.
 - **S2 - Sharing Fork custom commands through the repository:** where the file must live, and whether the
