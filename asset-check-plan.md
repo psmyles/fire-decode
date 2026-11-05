@@ -10,7 +10,7 @@
 - **Step 4, the rules repo, is next.** Step 0's spikes are still open:
   - S1 is mostly answered. From Fork too, the hook waits for the window, the window comes to the
     front, and both choices reach git. Fork's error dialog after Don't commit changed AC3 and AC4.
-  - S1's last questions (Fork's ✕, PATH, a long wait) should be answered before step 4 is finished.
+  - S1's last questions (Fork's ✕ and the hook's PATH) should be answered before step 4 is finished.
 - **Where the build differs from this design,** the sections below now describe what was built:
   run-level findings (AC10), the Launcher syntax (AC14), the cache key and staged copies (AC15).
 
@@ -652,8 +652,9 @@ Each step lands only when its gate passes.
     - **what the ✕ on Fork's progress item does** while the window is open. If it kills git and the
       hook's `sh` but leaves the window open, a later click in the window does nothing useful. The
       hook could then close the window when it's interrupted;
-    - which PATH the hook gets;
-    - how long a hook can take before Fork complains.
+    - which PATH the hook gets.
+  - **Fork doesn't time out a waiting hook:** the window was left open for six minutes, and Fork kept
+    waiting.
 - **S2 - Sharing Fork custom commands through the repository:** where the file must live, and whether the
   command can run an `sh` script with the repository path.
 - **S3 - git plumbing:** staged blob ids, the LFS object path for a staged file, detecting partially staged
