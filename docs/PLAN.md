@@ -9,7 +9,7 @@ of work on a Mac. Items that need Windows are collected at the end.
 | File | What it is |
 | --- | --- |
 | [`fire-decode-plan.md`](../fire-decode-plan.md) | The migration design: fire-decode becomes the decoder shared by fire, 3D Review and bite, with HEIF / HEIC / AVIF included. Decisions FD1-FD20; rollout steps 0-7 with gates in §5. fire's `docs/fire-decode-plan.md` is a copy, so keep the two in step |
-| [`asset-check-plan.md`](../asset-check-plan.md) | The Asset Check design: checking art assets against a technical artist's rules at commit time. Decisions AC1-AC19. It moves to the rules repo once that exists |
+| [`asset-check-plan.md`](../asset-check-plan.md) | A pointer only. The Asset Check design moved on 5 November 2026 to the rules repo, SandboxVR/exp-content-rules (`docs/asset-check-plan.md`); its history up to then is here |
 
 ## Priority
 
@@ -19,8 +19,8 @@ of work on a Mac. Items that need Windows are collected at the end.
 2. psmyles/fire - `fire-cli` and three small fire-decode additions (**done**, in `main`);
 3. psmyles/3d-review - the `3d-review-cli` changes (**done**, in `main`);
 4. psmyles/launcher - the results table, window `--set` and exit codes (**done**, in `main`);
-5. the rules repo - `rules.json`, rules files, hook scripts and the Launcher tools (Asset Check
-   step 4, **next**). The repository doesn't exist yet.
+5. SandboxVR/exp-content-rules, the rules repo - `rules.json`, rules files, hook scripts and the
+   Launcher tools (Asset Check step 4, **next**; its `docs/PLAN.md`). CrimeCrew is the pilot project.
 
 This repository's own queue starts after those, except item 1, which is quick. fire's fire-decode
 additions are in fire's `main`, so the extraction (item 3 below) can start from it.
@@ -114,5 +114,7 @@ gate as "macOS passed; Windows pending".
 
 ## References
 
-- [`fire-decode-plan.md`](../fire-decode-plan.md) and [`asset-check-plan.md`](../asset-check-plan.md).
-- `docs/PLAN.md` in psmyles/fire, psmyles/3d-review, psmyles/asset-rules and psmyles/launcher.
+- [`fire-decode-plan.md`](../fire-decode-plan.md).
+- `docs/asset-check-plan.md` in SandboxVR/exp-content-rules: the Asset Check design.
+- `docs/PLAN.md` in psmyles/fire, psmyles/3d-review, psmyles/asset-rules, psmyles/launcher and
+  SandboxVR/exp-content-rules.
