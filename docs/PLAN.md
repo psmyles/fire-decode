@@ -15,12 +15,13 @@ of work on a Mac. Items that need Windows are collected at the end.
 
 **Asset Check first, then the migration.** Asset Check's pieces live in other repositories; their
 `docs/PLAN.md` files hold the work:
-1. psmyles/asset-rules - the shared rules crate;
-2. psmyles/fire - `fire-cli` and three small fire-decode additions;
-3. psmyles/3d-review - the `3d-review-cli` changes;
-4. psmyles/launcher - the results table.
+1. psmyles/asset-rules - the shared rules crate (**done**, `v0.1.0`);
+2. psmyles/fire - `fire-cli` and three small fire-decode additions (**done**, in `main`);
+3. psmyles/3d-review - the `3d-review-cli` changes (**done**, in `main`);
+4. psmyles/launcher - the results table (next).
 
-This repository's own queue starts after those, except item 1, which is quick.
+This repository's own queue starts after those, except item 1, which is quick. fire's fire-decode
+additions are in fire's `main`, so the extraction (item 3 below) can start from it.
 
 ## Queue
 
@@ -93,8 +94,9 @@ This repository's own queue starts after those, except item 1, which is quick.
    - Also measure what libheif's SDR rendering does to PQ / HLG files.
 
 6. **Step 3, the API changes** (setups, `output`, `source`, `limits`, `hdr`, `fit`, `frames`, `probe()`,
-   thread budget, panic guard, `DecodeCtl`). Platform-neutral. fire uses them through an untracked
-   `.cargo/config.toml` `[patch]` pointing at this checkout, on a branch.
+   thread budget, panic guard, `DecodeCtl`). Platform-neutral. fire uses them on a branch, through a
+   `[patch]` pointing at this checkout, in a `.cargo/config.toml` in the folder that holds both
+   checkouts. fire's own `.cargo/config.toml` is committed, so it isn't the place.
 
 The gates are in `fire-decode-plan.md` §5. On a Mac only their macOS halves can pass, so record each
 gate as "macOS passed; Windows pending".

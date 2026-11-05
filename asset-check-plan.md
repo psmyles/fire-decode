@@ -1,7 +1,16 @@
 # Asset Check - Plan
 
-**Status: design, November 2026.** No code has been written. This document lives in the fire-decode
-repo for now and moves to the rules repo (AC5) once that repo exists.
+**Status, 5 November 2026:**
+- **Rollout steps 1 and 2 are done** (section 5). `asset-rules` is tagged `v0.1.0`; `fire-cli` and
+  `3d-review-cli` check files against `rules.json` and are merged into fire's and 3D Review's `main`.
+  On Windows the two tools gave every test file the same profile and stage.
+- **Step 0's spikes are still open**, and step 3 (the Launcher) is next. Spike S1 decides how the hook
+  waits for the window, so run it before step 4 at the latest.
+- **Where the build differs from this design,** the sections below now describe what was built:
+  run-level findings (AC10), the cache key and staged copies (AC15).
+
+This document lives in the fire-decode repo for now and moves to the rules repo (AC5) once that repo
+exists.
 
 ## The problem
 
@@ -242,6 +251,15 @@ Considered:
 `--results <file>` writes `asset-check.results` version 1. Both CLIs write the same shape, so the
 Launcher window, the Unity tool and CI read one format. Sketched in section 3.
 
+**Each CLI writes its own file,** e.g. `.git/asset-check/results-fire-cli.json` and
+`results-3d-review-cli.json`, listing only the files of its own types. A reader shows both together.
+
+**Run-level findings:** a top-level `findings` list, beside `files`, for what concerns the run rather
+than one file.
+- Today that is `tool.too_old`: the CLI is older than `rules.json`'s `requires` ("Update 3D Review to
+  version 0.9.0 or later").
+- These findings have the same fields as a file's, and the exit code counts them.
+
 **Per file:**
 - path, type, profile, stage;
 - status: checked, unreadable, or skipped;
@@ -332,9 +350,13 @@ profile is a normal map.
 
 All three are generic, so other tools can use them too:
 - **A results table control.**
-  - Rows are read from a JSON file whose path is a value in the form.
+  - Rows are read from JSON files whose paths are values in the form. For Asset Check there are two,
+    one per CLI (AC10), shown as one table.
   - Rows can be grouped by a field (here: one group per file, one row per finding), with a severity icon,
     a title line, and expandable detail text.
+  - Rows can also come from a list outside the groups. For Asset Check that is each results file's
+    top-level `findings` (AC10), shown first, in a group of their own, since they concern the whole
+    check rather than one asset (e.g. "Update 3D Review").
   - Each row can have buttons bound to steps; a step sees the clicked row's fields as `{row.field}`.
   - The table refreshes after a step finishes, and it scrolls.
 - **Pre-filling the window from the command line:** `launcher FILE --set ID=VALUE`. Today only an
@@ -356,15 +378,24 @@ All three are generic, so other tools can use them too:
 - **The staged version of each file**, not whatever happens to be on disk.
   - If the working file matches what is staged (the usual case for art), it is checked in place.
   - If it has unstaged changes, the staged content is checked instead: for a Git LFS file, from its
-    object in `.git/lfs/objects/`; otherwise extracted with `git cat-file` to a temporary file.
+    object in `.git/lfs/objects/`; otherwise from `git cat-file`.
+  - Either way, it is a temporary copy under the file's own name in `.git/asset-check/tmp/`, because
+    the loaders go by extension. Copies are removed afterwards; any left by a killed run are pruned
+    after a day.
 - **Only files added or changed in the commit** are checked, so existing content never raises
-  findings.
-- **The cache** lives in `.git/asset-check/cache/`. Each entry is keyed on four things:
+  findings. They come from one `git diff --cached --raw -z`, which names no paths, so a big commit
+  hits no command-line length limit.
+- **The cache** lives in `.git/asset-check/cache/`. Each entry is keyed on:
   - the staged blob id (git's own content hash; for an LFS file, the pointer's hash, which includes the
     content's hash);
   - the digest of the rules that applied;
-  - the tool's version;
-  - the resolved stage.
+  - the tool's name and version;
+  - the resolved stage;
+  - the file's path and the rest of its resolution (profile and its label), so a copied file or a
+    relabelled profile never shows an entry recorded for another path or the old label.
+
+  Only checked files are cached, since whether a file can be read can change without its content
+  changing. Entries unused for 30 days are pruned.
 
   The Fork command fills the cache, so the hook at commit time is instant for files already checked.
 - **Target:** a typical commit with up to 20 assets is checked in a few seconds without the cache.
@@ -384,7 +415,8 @@ submodule, chaining any hook already there.
 - It deliberately avoids `core.hooksPath`, which would switch off Git LFS's own hooks.
 
 **When something is missing, the window says so as a single finding**, with the fix:
-- tools not installed or too old ("Update 3D Review to 0.9");
+- tools not installed or too old ("Update 3D Review to 0.9"). Too old is the CLIs' own run-level
+  `tool.too_old` finding (AC10); not installed is the hook's to report, since the CLI never ran;
 - the rules submodule not checked out ("In Fork: Submodules > Update").
 
 **If the Launcher itself is missing,** the hook prints a message and lets the commit through. This is why
@@ -497,6 +529,7 @@ Illustrative only. Names settle when `asset-rules` is built.
   "tool": { "name": "fire-cli", "version": "0.1.0" },
   "rules": { "commit": "1a2b3c4", "digest": "sha256:…" },
   "context": { "branch": "main", "mode": "advise" },
+  "findings": [],
   "files": [
     {
       "path": "Assets/Art/Props/T_Crate_D.png",
@@ -519,6 +552,20 @@ Illustrative only. Names settle when `asset-rules` is built.
 }
 ```
 
+The top-level `findings` holds run-level findings (AC10), with the same fields as a file's. For
+example, from a `3d-review-cli` older than `requires`:
+
+```json
+{
+  "rule": "tool.too_old", "severity": "warning", "title": "3D Review is too old",
+  "what": "This is 3d-review-cli 0.8.0, but the rules need 0.9.0 or later.",
+  "why": "An older version may not know every rule the technical artist has set, so files can be checked against the wrong rules, or not at all.",
+  "how": "Update 3D Review to version 0.9.0 or later, then check again.",
+  "note": null, "measured": { "version": "0.8.0" }, "limit": { "min_version": "0.9.0" },
+  "objects": [], "fix": null
+}
+```
+
 ---
 
 ## 4. Dependencies on other plans
@@ -528,10 +575,10 @@ Illustrative only. Names settle when `asset-rules` is built.
   - `probe()` (FD19), for speed;
   - the `source` description (FD4), for bit depth and colour facts.
 
-  It also needs three small fire-decode additions, none blocking:
-  - expose the sRGB test;
-  - report palette-PNG bit depth correctly;
-  - a distinct "PSD has no merged image" error.
+  It also needed three small fire-decode additions, now done and in fire's `main` (fire's plan, A1):
+  - expose the sRGB test (`icc_is_srgb`);
+  - report the true PNG bit depth, plus a palette flag;
+  - a distinct "PSD has no merged image" error (`DecodeError::NoMergedImage`).
 - **3D Review** - the `3d-review-cli` changes in AC13.
 - **Launcher** - the three changes in AC14.
 
@@ -544,8 +591,8 @@ Each step lands only when its gate passes.
 | Step | Work | Gate |
 | --- | --- | --- |
 | 0 | **Spikes** (section 6), with Fork on Windows | Each spike answered, and the plan updated where an answer changes it |
-| 1 | **`asset-rules`**: `rules.json` v1, the resolution logic, results v1, git helpers, cache, `rules check` / `rules explain`, with test cases | Fixtures cover: first-match profiles, path narrowing, no match, each stage source in precedence order, a missing stage file, LFS and partially staged files |
-| 2 | **`fire-cli`** (`check`, `info`, the v1 rules) and the three fire-decode additions. **`3d-review-cli`** (`--rules`, `--results` with what/why/how, `--staged`, `--files-from`, `note`) | Both CLIs give the same file the same profile and stage. Results validate against the schema. A 20-asset commit is checked in a few seconds; a cached one almost instantly |
+| 1 | **`asset-rules`**: `rules.json` v1, the resolution logic, results v1, git helpers, cache, `rules check` / `rules explain`, with test cases. **Done:** `v0.1.0` | Fixtures cover: first-match profiles, path narrowing, no match, each stage source in precedence order, a missing stage file, LFS and partially staged files. **Passed** on macOS and Windows |
+| 2 | **`fire-cli`** (`check`, `info`, the v1 rules) and the three fire-decode additions. **`3d-review-cli`** (`--rules`, `--results` with what/why/how, `--staged`, `--files-from`, `note`). **Done**, in both repos' `main` | Both CLIs give the same file the same profile and stage. Results validate against the schema. A 20-asset commit is checked in a few seconds; a cached one almost instantly. **Passed on Windows** (5 November 2026): identical `rules explain` on four branch states; 20 textures 0.3 s cold / 0.13 s cached; 20 models 2.1 s / 0.13 s. The macOS bundle runs are still to do |
 | 3 | **Launcher**: results table control, window `--set`, the window exit code | A sample results file renders correctly. Row buttons see their row's fields. The hook reads the chosen exit code |
 | 4 | **The rules repo**: `rules.json`, the first profiles and rules files, hook scripts, `asset-check.launcher`, `setup.launcher`, the Fork command | Setup on a clean Windows machine. A bad asset opens the window; a clean commit shows nothing; "Don't commit" cancels the commit and "Commit anyway" lets it through. The Fork command works |
 | 5 | **Pilot** with 2-3 artists, in advise mode | Every finding is understood without help. False positives are fixed or the rule is tuned. Commit times are acceptable |
@@ -580,7 +627,10 @@ Each step lands only when its gate passes.
 
 ## Appendix A - Facts this plan rests on
 
-As of November 2026.
+As of November 2026, before any of this was built. Steps 1-2 have since changed some of them:
+`3d-review-cli` now has `--rules`, `--results` with what / why / how text, `--staged`, `--files-from`
+and per-rule notes (AC13); fire-decode has the three additions in section 4; `fire-cli` exists. Each
+tool's `docs/cli.md` is the current reference.
 
 **`3d-review-cli`** (3D Review 0.8.0, `docs/cli.md`; called `review-cli` up to 0.8.0, renamed in November 2026)
 - **Commands:** `audit`, `optimize`, `info`.
