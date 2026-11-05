@@ -350,19 +350,24 @@ profile is a normal map.
 
 All three are generic, so other tools can use them too:
 - **A results table control.**
-  - Rows are read from JSON files whose paths are values in the form. For Asset Check there are two,
-    one per CLI (AC10), shown as one table.
-  - Rows can be grouped by a field (here: one group per file, one row per finding), with a severity icon,
-    a title line, and expandable detail text.
-  - Rows can also come from a list outside the groups. For Asset Check that is each results file's
-    top-level `findings` (AC10), shown first, in a group of their own, since they concern the whole
-    check rather than one asset (e.g. "Update 3D Review").
-  - Each row can have buttons bound to steps; a step sees the clicked row's fields as `{row.field}`.
-  - The table refreshes after a step finishes, and it scrolls.
-- **Pre-filling the window from the command line:** `launcher FILE --set ID=VALUE`. Today only an
-  environment variable can do this.
+  - **It never reads Asset Check's format.** Its rows are a computed list, as a choice's options are:
+    tables with any fields. Asset Check's tool reads the two results files (one per CLI, AC10) in Lua
+    and flattens them into one row per finding.
+  - **Rows are grouped by a field,** here one group per file, each with a severity icon, a title line,
+    and expandable detail text.
+  - **Run-level findings come first,** in a group of their own: each results file's top-level
+    `findings` (AC10), since they concern the whole check rather than one asset (e.g. "Update 3D
+    Review").
+  - **Rows and group headers can have buttons** bound to steps. A step sees the clicked row's fields as
+    `{row.field}` (in Launcher's terms, `{control.field}`).
+  - **Per-file buttons** (Show in Explorer, Open) sit on the file's group header. A button can be hidden
+    per row or group by a condition on its fields.
+  - **The table refreshes after a step finishes, and it scrolls.**
+- **Pre-filling the window from the command line:** `launcher FILE --set ID=VALUE`, repeatable. Today
+  only an environment variable can do this.
 - **Ending the window with an exit code chosen by a step**, so the hook can read the artist's choice
-  (AC4).
+  (AC4), **plus a code for closing it without choosing.** Asset Check's tool sets that to 1, so closing
+  the window counts as **Don't commit**.
 
 `asset-check.launcher` (in the rules repo):
 - Reads the results path and the launch context, either `hook` or `manual`.
@@ -607,7 +612,10 @@ Each step lands only when its gate passes.
 
 **Spikes (step 0):**
 - **S1 - Fork and the hook on Windows:**
-  - Does a GUI program started from the `sh` hook keep the commit waiting until it exits?
+  - Does a GUI program started from the `sh` hook keep the commit waiting until it exits? **Yes, at the
+    git level** (checked 5 November 2026 with `git commit` from a terminal): git's `sh` waits for a
+    GUI-subsystem program, and its exit code reaches the hook. 1 stopped the commit and 0 let it
+    through. Still to confirm from Fork.
   - Can it come to the front?
   - What does Fork show while the hook runs, and when it exits 1?
   - Which PATH does the hook get?
