@@ -9,8 +9,10 @@
     Windows a real `pre-commit` hook waited for the window and got the artist's choice.
 - **Step 4, the rules repo, is next.** Step 0's spikes are still open:
   - S1 is mostly answered. From Fork too, the hook waits for the window, the window comes to the
-    front, and both choices reach git. Fork's error dialog after Don't commit changed AC3 and AC4.
-  - S1's last questions (Fork's ✕ and the hook's PATH) should be answered before step 4 is finished.
+    front, and both choices reach git. Fork's error dialog after Don't commit changed AC3 and AC4,
+    and the hook's PATH confirmed AC16's recorded tool paths.
+  - S1's last question (what Fork's ✕ does while the window is open) should be answered before step
+    4 is finished.
 - **Where the build differs from this design,** the sections below now describe what was built:
   run-level findings (AC10), the Launcher syntax (AC14), the cache key and staged copies (AC15).
 
@@ -447,6 +449,18 @@ submodule, chaining any hook already there.
 **If the Launcher itself is missing,** the hook prints a message and lets the commit through. This is why
 setup must succeed first.
 
+**A Launcher that's too old counts as missing,** so the hook checks `launcher --version` against
+`rules.json`'s minimum before opening the window. It can't leave this to the window: Launcher exits 0
+whenever it can't use the tool file (checked 5 November 2026), so the artist sees an error, closes it,
+and the commit goes through. That happens when:
+- the Launcher predates the results table and exit codes (0.2.1 and earlier always exit 0);
+- `asset-check.launcher` asks for a newer Launcher (`requires=`);
+- `asset-check.launcher` has an error.
+
+The last of these is the technical artist's to prevent: the rules repo runs `launcher check` on its
+tools before a change is pushed. Whether Launcher should give the hook a distinct exit code when it
+can't load a file is open in Launcher's plan.
+
 **Planned with the Unity tool (AC17):** the Unity project checks for the hook when it opens and offers
 to install it, so most artists never run setup by hand.
 
@@ -648,13 +662,22 @@ Each step lands only when its gate passes.
       print a plain message when the artist chooses Don't commit.
     - **Fork offers a one-click way past the hook.** In advise mode that's the same as Commit anyway.
       In enforce mode it's a bypass, so the required GitHub check (AC18, step 8) matters (AC3).
-  - Still to check from Fork:
-    - **what the ✕ on Fork's progress item does** while the window is open. If it kills git and the
-      hook's `sh` but leaves the window open, a later click in the window does nothing useful. The
-      hook could then close the window when it's interrupted;
-    - which PATH the hook gets.
   - **Fork doesn't time out a waiting hook:** the window was left open for six minutes, and Fork kept
     waiting.
+  - **Fork runs hooks with its own bundled Git,** 2.50.1 in `%LOCALAPPDATA%\Fork\gitInstance`, not the
+    system's (2.55.0 on the dev machine). So the hook's `sh` and its Unix tools are Fork's copies, and
+    the hook script must not depend on a newer Git.
+  - **The hook's PATH** is Git's own folders (`/mingw64/libexec/git-core`, `/mingw64/bin`,
+    `/usr/bin`) followed by the user's full Windows PATH. On the dev machine:
+    - 3D Review's and Launcher's install folders are on it, so `3d-review-cli` and `launcher` were
+      found. 3D Review's installer only adds its folder to PATH if that option is ticked; it's off by
+      default (Appendix A);
+    - Fire's folder isn't, so `fire-cli`, installed beside `fire.exe` (AC12), wasn't found.
+
+    So the hook can't count on PATH. This confirms AC16's `tools.env`.
+  - Still to check from Fork: **what the ✕ on Fork's progress item does** while the window is open.
+    If it kills git and the hook's `sh` but leaves the window open, a later click in the window does
+    nothing useful. The hook could then close the window when it's interrupted.
 - **S2 - Sharing Fork custom commands through the repository:** where the file must live, and whether the
   command can run an `sh` script with the repository path.
 - **S3 - git plumbing:** staged blob ids, the LFS object path for a staged file, detecting partially staged
