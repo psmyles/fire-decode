@@ -1,13 +1,18 @@
 # Asset Check - Plan
 
 **Status, 5 November 2026:**
-- **Rollout steps 1 and 2 are done** (section 5). `asset-rules` is tagged `v0.1.0`; `fire-cli` and
-  `3d-review-cli` check files against `rules.json` and are merged into fire's and 3D Review's `main`.
-  On Windows the two tools gave every test file the same profile and stage.
-- **Step 0's spikes are still open**, and step 3 (the Launcher) is next. Spike S1 decides how the hook
-  waits for the window, so run it before step 4 at the latest.
+- **Rollout steps 1-3 are done** (section 5):
+  - `asset-rules` is tagged `v0.1.0`;
+  - `fire-cli` and `3d-review-cli` check files against `rules.json` and are merged into fire's and 3D
+    Review's `main`. On Windows the two tools gave every test file the same profile and stage;
+  - Launcher has the results table, window `--set` and the window's exit code, in its `main`. On
+    Windows a real `pre-commit` hook waited for the window and got the artist's choice.
+- **Step 4, the rules repo, is next.** Step 0's spikes are still open:
+  - S1 is partly answered: from Fork too, the hook waits for the window. Fork's error dialog after
+    Don't commit changed AC3 and AC4.
+  - S1's other questions should be answered before step 4 is finished.
 - **Where the build differs from this design,** the sections below now describe what was built:
-  run-level findings (AC10), the cache key and staged copies (AC15).
+  run-level findings (AC10), the Launcher syntax (AC14), the cache key and staged copies (AC15).
 
 This document lives in the fire-decode repo for now and moves to the rules repo (AC5) once that repo
 exists.
@@ -129,8 +134,9 @@ So:
   - Its results are cached (AC15), so the hook is then instant for the same files.
   - It is shared with the team through the repository (the exact mechanism is confirmed in spike S2).
 
-Bypassing the hook is still possible (`--no-verify`, or a client that skips hooks). The GitHub check
-(AC18) is the backstop that catches anything that slipped through.
+Bypassing the hook is still possible: `--no-verify`, a client that skips hooks, or Fork's own **Skip
+pre-commit hooks and commit** button, which its error dialog offers whenever the hook stops a commit
+(S1). The GitHub check (AC18) is the backstop that catches anything that slipped through.
 
 ### AC4 - The hook waits for the artist; the window appears only for warnings and errors
 
@@ -139,15 +145,21 @@ Bypassing the hook is still possible (`--no-verify`, or a client that skips hook
 2. If no warning or error was found, it exits 0 with nothing shown. Info-level findings never open the
    window.
 3. Otherwise it opens the Asset Check window and **waits for the artist's choice**:
-   - **Don't commit** → the hook exits 1;
+   - **Don't commit** (or closing the window) → the hook prints a plain message and exits 1;
    - **Commit anyway** → the hook exits 0.
+
+**The message after Don't commit is written for the artist.** Fork shows it in a dialog titled "Git
+Error", which says an unexpected error occurred (S1), so the message has to say that nothing went
+wrong. For example: "Asset Check: you chose not to commit, so you can fix the files it listed. Your
+staged changes are kept. Fix the files, stage them again and commit." It follows AC11's plain-language
+rules. The same dialog also offers **Skip pre-commit hooks and commit** (AC3).
 
 **Why the checks run before the window opens, not inside it:** a clean commit must show nothing.
 Opening the window on every commit just to run the checks would flash it each time. The checks are
 kept fast (AC15), and the Fork command gives artists a way to check early.
 
-**This needs one Launcher change:** the window has to be able to end with an exit code chosen by a step.
-Today it always exits 0 (AC14).
+**This needed one Launcher change, now built:** the window ends with an exit code chosen by a step
+(AC14). Before that change it always exited 0.
 
 ### AC5 - The rules repo
 
@@ -348,26 +360,34 @@ profile is a normal map.
 
 ### AC14 - Launcher changes
 
-All three are generic, so other tools can use them too:
-- **A results table control.**
-  - **It never reads Asset Check's format.** Its rows are a computed list, as a choice's options are:
-    tables with any fields. Asset Check's tool reads the two results files (one per CLI, AC10) in Lua
-    and flattens them into one row per finding.
-  - **Rows are grouped by a field,** here one group per file, each with a severity icon, a title line,
-    and expandable detail text.
+**Built** (Launcher `4f1c615`, 5 November 2026; it first ships in the next Launcher release).
+Launcher's `docs/PLAN.md`, "What step 4 writes", has the full syntax, and its
+`tests/fixtures/asset-check/asset-check.launcher` is a working stand-in. All three changes are
+generic, so other tools can use them too:
+- **A results table control, `table`.**
+  - **It never reads Asset Check's format.** Its rows are a computed list, `rows=(lua)`: tables with
+    any fields. Asset Check's tool reads the two results files (one per CLI, AC10) in Lua and
+    flattens them into one row per finding.
+  - **Rows are grouped by a field** (`group-by`), here one group per file. Each row has a severity
+    icon (`icon-from`), a title line (`row-label`), and detail text that opens under it (`details`).
   - **Run-level findings come first,** in a group of their own: each results file's top-level
     `findings` (AC10), since they concern the whole check rather than one asset (e.g. "Update 3D
-    Review").
-  - **Rows and group headers can have buttons** bound to steps. A step sees the clicked row's fields as
-    `{row.field}` (in Launcher's terms, `{control.field}`).
-  - **Per-file buttons** (Show in Explorer, Open) sit on the file's group header. A button can be hidden
-    per row or group by a condition on its fields.
-  - **The table refreshes after a step finishes, and it scrolls.**
-- **Pre-filling the window from the command line:** `launcher FILE --set ID=VALUE`, repeatable. Today
-  only an environment variable can do this.
+    Review"). The tool's Lua puts them first; groups keep the order they first appear in.
+  - **Rows and group headers can have buttons** (`row-button`, `group-button`) bound to steps. A step
+    sees the clicked row's fields as `{findings.field}`, where `findings` is the table's id.
+  - **Per-file buttons** (Show in Explorer, Open) sit on the file's group header. A button's
+    `show-if` reads the row's fields as `values.field`, so the run-level group has none.
+  - **The rows are worked out again after every run, and the table scrolls** past its `height`.
+- **Pre-filling the window from the command line:** `launcher FILE --set ID=VALUE`, repeatable.
+  - The values win over remembered ones and aren't remembered themselves.
+  - A tool's Lua resolves relative paths against the `.launcher` file's folder, so the hook passes the
+    results files as absolute paths.
 - **Ending the window with an exit code chosen by a step**, so the hook can read the artist's choice
-  (AC4), **plus a code for closing it without choosing.** Asset Check's tool sets that to 1, so closing
-  the window counts as **Don't commit**.
+  (AC4): `steps "dont" when-done="close" exit-code=1 { … }`. **Plus a code for closing the window
+  without choosing**, `window close-code=1`. Asset Check's tool uses 1, so closing the window counts
+  as **Don't commit**.
+- **`asset-check.launcher` must require the Launcher release that has these features**
+  (`requires=`): an older Launcher doesn't know `table`.
 
 `asset-check.launcher` (in the rules repo):
 - Reads the results path and the launch context, either `hook` or `manual`.
@@ -584,8 +604,8 @@ example, from a `3d-review-cli` older than `requires`:
   - expose the sRGB test (`icc_is_srgb`);
   - report the true PNG bit depth, plus a palette flag;
   - a distinct "PSD has no merged image" error (`DecodeError::NoMergedImage`).
-- **3D Review** - the `3d-review-cli` changes in AC13.
-- **Launcher** - the three changes in AC14.
+- **3D Review** - the `3d-review-cli` changes in AC13, done and in 3D Review's `main`.
+- **Launcher** - the three changes in AC14, done and in Launcher's `main`.
 
 ---
 
@@ -598,7 +618,7 @@ Each step lands only when its gate passes.
 | 0 | **Spikes** (section 6), with Fork on Windows | Each spike answered, and the plan updated where an answer changes it |
 | 1 | **`asset-rules`**: `rules.json` v1, the resolution logic, results v1, git helpers, cache, `rules check` / `rules explain`, with test cases. **Done:** `v0.1.0` | Fixtures cover: first-match profiles, path narrowing, no match, each stage source in precedence order, a missing stage file, LFS and partially staged files. **Passed** on macOS and Windows |
 | 2 | **`fire-cli`** (`check`, `info`, the v1 rules) and the three fire-decode additions. **`3d-review-cli`** (`--rules`, `--results` with what/why/how, `--staged`, `--files-from`, `note`). **Done**, in both repos' `main` | Both CLIs give the same file the same profile and stage. Results validate against the schema. A 20-asset commit is checked in a few seconds; a cached one almost instantly. **Passed on Windows** (5 November 2026): identical `rules explain` on four branch states; 20 textures 0.3 s cold / 0.13 s cached; 20 models 2.1 s / 0.13 s. The macOS bundle runs are still to do |
-| 3 | **Launcher**: results table control, window `--set`, the window exit code | A sample results file renders correctly. Row buttons see their row's fields. The hook reads the chosen exit code |
+| 3 | **Launcher**: results table control, window `--set`, the window exit code. **Done**, in Launcher's `main` | A sample results file renders correctly. Row buttons see their row's fields. The hook reads the chosen exit code. **Passed on Windows** (5 November 2026): a pair of real results files renders as one table; row and group buttons see their row's fields (core, UI and end-to-end tests); from a real `pre-commit` hook, **Commit anyway** exits 0 and the commit lands, while **Don't commit** or closing the window exits 1 and the commit is stopped |
 | 4 | **The rules repo**: `rules.json`, the first profiles and rules files, hook scripts, `asset-check.launcher`, `setup.launcher`, the Fork command | Setup on a clean Windows machine. A bad asset opens the window; a clean commit shows nothing; "Don't commit" cancels the commit and "Commit anyway" lets it through. The Fork command works |
 | 5 | **Pilot** with 2-3 artists, in advise mode | Every finding is understood without help. False positives are fixed or the rule is tuned. Commit times are acceptable |
 | 6 | **Unity editor tool** (AC17) | Imports of bad assets show findings. A pull shows nothing. Hook installation works on project open |
@@ -612,14 +632,25 @@ Each step lands only when its gate passes.
 
 **Spikes (step 0):**
 - **S1 - Fork and the hook on Windows:**
-  - Does a GUI program started from the `sh` hook keep the commit waiting until it exits? **Yes, at the
-    git level** (checked 5 November 2026 with `git commit` from a terminal): git's `sh` waits for a
-    GUI-subsystem program, and its exit code reaches the hook. 1 stopped the commit and 0 let it
-    through. Still to confirm from Fork.
-  - Can it come to the front?
-  - What does Fork show while the hook runs, and when it exits 1?
-  - Which PATH does the hook get?
-  - How long can a hook take before Fork complains?
+  - Does a GUI program started from the `sh` hook keep the commit waiting until it exits? **Yes.**
+    - At the git level (checked 5 November 2026 with `git commit` from a terminal): git's `sh` waits for
+      a GUI-subsystem program, and its exit code reaches the hook. 1 stopped the commit and 0 let it
+      through. Then confirmed with Launcher itself and the stand-in window (step 3's gate).
+    - **From Fork** (5 November 2026, the stand-in window in a scratch repository): the window opened
+      with its findings, and closing it stopped the commit.
+  - **When the hook exits 1, Fork shows a "Git Error" dialog:** "An unexpected error occurred while
+    performing the git request", then the `git commit` command line and the hook's output. Below
+    them is a **Skip pre-commit hooks and commit** button. This changes the design in two places:
+    - **The hook's message is what the artist reads,** under an alarming title. AC4 now has the hook
+      print a plain message when the artist chooses Don't commit.
+    - **Fork offers a one-click way past the hook.** In advise mode that's the same as Commit anyway.
+      In enforce mode it's a bypass, so the required GitHub check (AC18, step 8) matters (AC3).
+  - Still to check from Fork:
+    - whether the window comes to the front over Fork by itself;
+    - what Fork shows while the hook waits;
+    - **Commit anyway** (exit 0) going through;
+    - which PATH the hook gets;
+    - how long a hook can take before Fork complains.
 - **S2 - Sharing Fork custom commands through the repository:** where the file must live, and whether the
   command can run an `sh` script with the repository path.
 - **S3 - git plumbing:** staged blob ids, the LFS object path for a staged file, detecting partially staged

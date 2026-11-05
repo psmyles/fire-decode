@@ -18,7 +18,9 @@ of work on a Mac. Items that need Windows are collected at the end.
 1. psmyles/asset-rules - the shared rules crate (**done**, `v0.1.0`);
 2. psmyles/fire - `fire-cli` and three small fire-decode additions (**done**, in `main`);
 3. psmyles/3d-review - the `3d-review-cli` changes (**done**, in `main`);
-4. psmyles/launcher - the results table (next).
+4. psmyles/launcher - the results table, window `--set` and exit codes (**done**, in `main`);
+5. the rules repo - `rules.json`, rules files, hook scripts and the Launcher tools (Asset Check
+   step 4, **next**). The repository doesn't exist yet.
 
 This repository's own queue starts after those, except item 1, which is quick. fire's fire-decode
 additions are in fire's `main`, so the extraction (item 3 below) can start from it.
