@@ -7,12 +7,17 @@
     Review's `main`. On Windows the two tools gave every test file the same profile and stage;
   - Launcher has the results table, window `--set` and the window's exit code, in its `main`. On
     Windows a real `pre-commit` hook waited for the window and got the artist's choice.
-- **Step 4, the rules repo, is next.** Step 0's spikes are still open:
-  - S1 is mostly answered. From Fork too, the hook waits for the window, the window comes to the
-    front, and both choices reach git. Fork's error dialog after Don't commit changed AC3 and AC4,
-    and the hook's PATH confirmed AC16's recorded tool paths.
-  - S1's last question (what Fork's ✕ does while the window is open) should be answered before step
-    4 is finished.
+- **Step 4, the rules repo, is next.** Step 0's spikes:
+  - **S1 is answered** (5 November 2026). From Fork too:
+    - the hook waits for the window, without a timeout;
+    - the window comes to the front;
+    - both choices reach git;
+    - Fork's ✕ leaves the window in charge.
+
+    Fork's error dialog after Don't commit changed AC3 and AC4, and the hook's PATH confirmed AC16's
+    recorded tool paths.
+  - S3 (git plumbing) was answered by building asset-rules. **S2, sharing the Fork command through
+    the repository, is the only open spike.** Step 4 needs it for the "Check staged files" command.
 - **Where the build differs from this design,** the sections below now describe what was built:
   run-level findings (AC10), the Launcher syntax (AC14), the cache key and staged copies (AC15).
 
@@ -675,13 +680,19 @@ Each step lands only when its gate passes.
     - Fire's folder isn't, so `fire-cli`, installed beside `fire.exe` (AC12), wasn't found.
 
     So the hook can't count on PATH. This confirms AC16's `tools.env`.
-  - Still to check from Fork: **what the ✕ on Fork's progress item does** while the window is open.
-    If it kills git and the hook's `sh` but leaves the window open, a later click in the window does
-    nothing useful. The hook could then close the window when it's interrupted.
+  - **The ✕ on Fork's progress item doesn't end the hook.** Fork shows "Canceling…" with a spinner,
+    and the window stays open and working. When the window is closed, Fork marks the commit
+    "canceled" with a warning sign and shows the hook's output in its activity list. So the hook
+    needs no handling for it.
+    - Not checked: ✕ followed by **Commit anyway**. If Fork has killed `git` by then, nothing is
+      committed. If it hasn't, the commit lands while Fork says "canceled". Either way it's a rare
+      path, and the artist can see the result in Fork's history.
 - **S2 - Sharing Fork custom commands through the repository:** where the file must live, and whether the
   command can run an `sh` script with the repository path.
 - **S3 - git plumbing:** staged blob ids, the LFS object path for a staged file, detecting partially staged
-  files, and the branch in a detached HEAD.
+  files, and the branch in a detached HEAD. **Answered by building it:** asset-rules' `src/git.rs`
+  (`v0.1.0`). Step 1's fixtures cover LFS and partially staged files, and step 2's cross-tool check
+  covered a detached HEAD.
 
 **Open items:**
 - **Per-asset stage marking** (AC7): the mechanism is undecided.
