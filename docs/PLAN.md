@@ -1,6 +1,7 @@
 # fire-decode - Work Plan
 
-**Status, November 2026:** this repository holds designs only. The crate itself still lives in fire
+**Status, 10 November 2026:** this repository holds designs only. Asset Check is done, so the queue
+below starts now. The crate itself still lives in fire
 (`crates/fire-decode`, `crates/psd-sdk-sys`, `crates/heif-sys`). The work below is ordered for a stretch
 of work on a Mac. Items that need Windows are collected at the end.
 
@@ -13,17 +14,20 @@ of work on a Mac. Items that need Windows are collected at the end.
 
 ## Priority
 
-**Asset Check first, then the migration.** Asset Check's pieces live in other repositories; their
-`docs/PLAN.md` files hold the work:
+**Asset Check first, then the migration.** Asset Check is done (10 November 2026). Its pieces live in
+other repositories; their `docs/PLAN.md` files hold the work:
 1. psmyles/asset-rules - the shared rules crate (**done**, `v0.1.0`);
 2. psmyles/fire - `fire-cli` and three small fire-decode additions (**done**, in `main`);
 3. psmyles/3d-review - the `3d-review-cli` changes (**done**, in `main`);
 4. psmyles/launcher - the results table, window `--set` and exit codes (**done**, in `main`);
 5. SandboxVR/exp-content-rules, the rules repo - `rules.json`, rules files, hook scripts and the
-   Launcher tools (Asset Check step 4, **next**; its `docs/PLAN.md`). CrimeCrew is the pilot project.
+   Launcher tools (Asset Check step 4, **done**; its `docs/PLAN.md`). CrimeCrew is the pilot project.
 
-This repository's own queue starts after those, except item 1, which is quick. fire's fire-decode
-additions are in fire's `main`, so the extraction (item 3 below) can start from it.
+fire's fire-decode additions are in fire's `main`, so the extraction (item 3 below) can start from it.
+
+**10 November 2026:** the plan was re-checked against fire `710b3f6`, 3D Review `746f64b` and bite
+`b511984`, and five points were settled. They are listed in `fire-decode-plan.md` under "Settled on
+10 November". fire's copy was updated to match.
 
 ## Queue
 
@@ -37,7 +41,12 @@ additions are in fire's `main`, so the extraction (item 3 below) can start from 
      - Commit only files that may be redistributed; keep the rest in a local folder named by an
        environment variable.
    - **Record macOS baselines:** fire TTFP per format (fire's `scripts/ttfp.sh`), plus 3D Review's
-     startup gate and binary sizes.
+     startup gate and binary sizes. 3D Review's Windows baselines are done (its `docs/PLAN.md`).
+   - **bite's baselines:** cold and warm import by format, counting `magick` processes.
+     - The corpus needs PSD, EXR and HEIF files. bite's `test_images` holds only JPG, TGA and PNG.
+     - Measure the warm import as the GUI does it: a fresh `ThumbnailCache` over a full disk cache.
+       Neither of bite's benchmarks does that (plan §6).
+     - Clear the thumbnail cache before each run.
 
 3. **Step 1, the parts a Mac can do.** Start only **after fire's Asset Check additions have landed**
    (fire `docs/PLAN.md` A1), so they come over with the history.
@@ -95,8 +104,9 @@ additions are in fire's `main`, so the extraction (item 3 below) can start from 
    - the first frame of sequence-only files.
    - Also measure what libheif's SDR rendering does to PQ / HLG files.
 
-6. **Step 3, the API changes** (setups, `output`, `source`, `limits`, `hdr`, `fit`, `frames`, `probe()`,
-   thread budget, panic guard, `DecodeCtl`). Platform-neutral. fire uses them on a branch, through a
+6. **Step 3, the API changes** (setups including `inspect()`, `output` including `Rgba8OrFloat`,
+   `source`, `limits`, `hdr`, `fit`, `frames`, `surfaces`, `stored_mips`, `probe()`, thread budget,
+   panic guard, `DecodeCtl`). Platform-neutral. fire uses them on a branch, through a
    `[patch]` pointing at this checkout, in a `.cargo/config.toml` in the folder that holds both
    checkouts. fire's own `.cargo/config.toml` is committed, so it isn't the place.
 
