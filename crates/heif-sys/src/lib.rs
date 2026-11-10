@@ -11,9 +11,11 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-mod ffi {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
+#[path = "bindings.rs"]
+mod ffi;
+
+// A named compile_error! on a target this crate has no libraries for (written by build.rs).
+include!(concat!(env!("OUT_DIR"), "/target_check.rs"));
 
 /// A decoded HEIF/AVIF primary image, normalized to interleaved RGBA.
 #[derive(Debug, Clone)]
@@ -50,7 +52,7 @@ pub fn decode_heif(bytes: &[u8]) -> Result<HeifImage, HeifError> {
     // SAFETY: `bytes` is a valid read-only slice for the duration of the call; libheif
     // reads it without copying but only within the call. On success the wrapper hands us
     // malloc'd buffers which we copy out and then free via fire_heif_image_free (so alloc
-    // and free stay on the same /MD CRT heap).
+    // and free stay on the one CRT heap the crate links).
     unsafe {
         let mut out: ffi::fire_heif_image = std::mem::zeroed();
         let rc = ffi::fire_heif_decode(bytes.as_ptr(), bytes.len(), &mut out);

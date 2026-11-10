@@ -9,6 +9,15 @@
 
 #include <libheif/heif.h>
 
+/* The layout src/bindings.rs asserts on the Rust side (64-bit targets only, which is all
+ * build.rs accepts). If wrapper.h changes, both sides change together. */
+_Static_assert(sizeof(fire_heif_image) == 48, "fire_heif_image size");
+_Static_assert(offsetof(fire_heif_image, bit_depth) == 8, "fire_heif_image.bit_depth");
+_Static_assert(offsetof(fire_heif_image, pixels) == 16, "fire_heif_image.pixels");
+_Static_assert(offsetof(fire_heif_image, pixels_len) == 24, "fire_heif_image.pixels_len");
+_Static_assert(offsetof(fire_heif_image, icc) == 32, "fire_heif_image.icc");
+_Static_assert(offsetof(fire_heif_image, icc_len) == 40, "fire_heif_image.icc_len");
+
 /* Release the libheif objects acquired during a decode, in reverse order. */
 static void cleanup(struct heif_image* img, struct heif_image_handle* handle,
                     struct heif_context* ctx) {

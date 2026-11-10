@@ -3,13 +3,14 @@ name = "fire-decode"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 
 [features]
-# On by default: the shipped fire.exe decodes PSD and HEIF/AVIF. They are features only so the
-# crate can be built and tested without the vendored native trees `psd-sdk-sys` / `heif-sys`
-# need — which is what lets CI lint and test the pure-Rust decode core on any runner. Turning
+# No default features (FD13): each app names what it uses. `psd` and `heif` need the native code in
+# `psd-sdk-sys` / `heif-sys`, so CI can still lint and test the pure-Rust core on its own. Turning
 # one off does not re-route those formats; it makes them a clear error (see `decode_psd`).
-default = ["psd", "heif"]
+default = []
 psd = ["dep:psd-sdk-sys"]
 heif = ["dep:heif-sys"]
 

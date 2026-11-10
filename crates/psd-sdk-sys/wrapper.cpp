@@ -1,7 +1,5 @@
-// C-ABI implementation over psd_sdk (Molecular Matters, C++). Compiled by MSVC cl.exe
-// via the cc crate (NOT by clang/bindgen), so using the C++ STL here is fine — the
-// clang-18/MSVC-STL STL1000 constraint only applies to bindgen's parse of wrapper.h,
-// which stays C-style.
+// C-ABI implementation over psd_sdk (Molecular Matters, C++), compiled through the cc crate
+// (MSVC on Windows, clang on macOS). The C++ STL is fine here; only wrapper.h stays C-style.
 //
 // Scope: the MERGED/composited image only (present when the PSD was saved with "Maximize
 // Compatibility"). Individual layers are decoded in Rust by fire-decode's `psd_layers`, never
@@ -25,6 +23,14 @@
 #include "PsdParseColorModeDataSection.h"
 
 #include <algorithm>
+#include <cstddef>
+
+// The layout src/bindings.rs asserts on the Rust side. If wrapper.h changes, both sides change.
+static_assert(sizeof(fire_psd_info) == 16, "fire_psd_info size");
+static_assert(alignof(fire_psd_info) == 4, "fire_psd_info alignment");
+static_assert(offsetof(fire_psd_info, channels) == 8, "fire_psd_info.channels");
+static_assert(offsetof(fire_psd_info, bits_per_channel) == 10, "fire_psd_info.bits_per_channel");
+static_assert(offsetof(fire_psd_info, color_mode) == 12, "fire_psd_info.color_mode");
 #include <cmath>
 #include <cstring>
 #include <new>

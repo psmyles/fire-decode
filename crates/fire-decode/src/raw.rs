@@ -137,11 +137,10 @@ pub fn find_preview(b: &[u8]) -> Option<Preview<'_>> {
         let (cands, o) = collect_tiff(b);
         orientation = o.unwrap_or(1);
         best = pick_largest(b, &cands);
-    } else if b.starts_with(b"FUJIFILMCCD-RAW") {
-        if let Some(c) = raf_preview(b) {
+    } else if b.starts_with(b"FUJIFILMCCD-RAW")
+        && let Some(c) = raf_preview(b) {
             best = pick_largest(b, &[c]);
         }
-    }
 
     // Fallback for non-TIFF containers (CR3/ISOBMFF, CRW/CIFF) and for any TIFF whose
     // directories didn't yield a decodable preview: scan the whole file for JPEG streams.
@@ -318,11 +317,10 @@ fn collect_tiff(b: &[u8]) -> (Vec<(usize, usize)>, Option<u16>) {
             match tag {
                 0x0112 => {
                     // Orientation — first one wins (IFD0's), including an explicit 1.
-                    if orientation.is_none() {
-                        if let Some(v) = entry_scalar(b, eo, typ, le) {
+                    if orientation.is_none()
+                        && let Some(v) = entry_scalar(b, eo, typ, le) {
                             orientation = Some(v as u16);
                         }
-                    }
                 }
                 0x0103 => {
                     if let Some(v) = entry_scalar(b, eo, typ, le) {
@@ -348,26 +346,22 @@ fn collect_tiff(b: &[u8]) -> (Vec<(usize, usize)>, Option<u16>) {
         }
 
         // A directory's full-size JPEG preview (Canon/Nikon/Sony thumbnails & previews).
-        if let (Some(o), Some(l)) = (jpeg_off, jpeg_len) {
-            if l > 0 {
+        if let (Some(o), Some(l)) = (jpeg_off, jpeg_len)
+            && l > 0 {
                 cands.push((o as usize, l as usize));
             }
-        }
         // A single-strip JPEG-compressed image (DNG / some ARW previews live here).
-        if compression == 6 || compression == 7 {
-            if let (Some(o), Some(l)) = (strip_off, strip_len) {
-                if l > 0 {
+        if (compression == 6 || compression == 7)
+            && let (Some(o), Some(l)) = (strip_off, strip_len)
+                && l > 0 {
                     cands.push((o as usize, l as usize));
                 }
-            }
-        }
 
         // Next directory in the IFD chain.
-        if let Some(next) = rd_u32(b, base + 2 + count * 12, le) {
-            if next != 0 {
+        if let Some(next) = rd_u32(b, base + 2 + count * 12, le)
+            && next != 0 {
                 stack.push(next);
             }
-        }
     }
 
     (cands, orientation)

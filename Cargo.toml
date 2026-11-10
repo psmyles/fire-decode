@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+members = ["crates/fire-decode", "crates/psd-sdk-sys", "crates/heif-sys"]
+# Measurement tools with workspaces of their own: they build against sibling checkouts.
+exclude = ["bench/bite-import", "bench/png-to-exr"]
+
+[workspace.package]
+edition = "2024"
+# The latest stable at the extraction (FD13); `rust-toolchain.toml` pins the same.
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/psmyles/fire-decode"
+publish = false
+
+# 3D Review's level (FD13). Every `unsafe` lives in the two -sys crates and carries a `// SAFETY:`.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+# The versions fire used when the crate left it (fire 710b3f6), so fire's switch to the tag
+# changes no decoder.
+[workspace.dependencies]
+# zune is the hot-path decoder for the common formats. Its default feature is `all`, wider than
+# `sniff()` routes: PSD goes to psd_sdk, and PNG / HDR to `image` (measured faster). So only the
+# formats routed here, plus the two speed features.
+zune-image = { version = "0.5", default-features = false, features = [
+    "jpeg",
+    "bmp",
+    "qoi",
+    "ppm",
+    "farbfeld",
+    "webp",
+    "jpeg-xl",
+    "simd",
+    "threads",
+] }
+zune-core = "0.5"
+zune-jpeg = "0.5"
+zune-bmp = "0.5"
+zune-ppm = "0.5"
+zune-farbfeld = "0.5"
+jxl-oxide = "0.12"
+qoi = "0.4"
+libwebp-sys = "0.14"
+image-webp = "0.2"
+# The fallback decoder (TIFF / TGA / ICO), multi-frame GIF, and the PNG and Radiance HDR paths.
+# Not the default features: they pull in an AV1 encoder (`avif` -> `rav1e`) nothing can reach.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "gif",
+    "hdr",
+    "tiff",
+    "tga",
+    "ico",
+    "bmp",
+    "jpeg",
+] }
+tiff = "0.11"
+exr = "1"
+lcms2 = { version = "6", features = ["static"] }
+# DDS: the header parser and a BC1-BC7 (BC6H included) block decompressor, both pure Rust.
+ddsfile = "0.6"
+bcdec_rs = "0.2"
+miniz_oxide = "0.8"
+bytemuck = { version = "1", features = ["derive"] }
+
+psd-sdk-sys = { path = "crates/psd-sdk-sys" }
+heif-sys = { path = "crates/heif-sys" }
+
+# --- build deps ---
+cc = "1"

@@ -11,9 +11,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-mod ffi {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
+#[path = "bindings.rs"]
+mod ffi;
 
 /// A decoded PSD merged image, normalized to interleaved RGBA at the document's own depth.
 #[derive(Debug, Clone)]

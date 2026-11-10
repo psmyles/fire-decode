@@ -3,15 +3,19 @@ name = "psd-sdk-sys"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 build = "build.rs"
+# Owns the native `fire_psd` library. 3D Review's `crates/psd` builds one by the same name with the
+# same `fire_psd_*` symbols; with `links` on both, cargo refuses a binary holding the two, rather
+# than the linker taking each symbol from either copy (FD3).
+links = "fire_psd"
 
 [dependencies]
 
 [build-dependencies]
-# cc compiles the vendored psd_sdk C++ + the extern "C" wrapper into a static lib;
-# bindgen generates the Rust FFI declarations from the C-ABI wrapper.h.
+# cc compiles the vendored psd_sdk C++ and the extern "C" wrapper into a static lib.
 cc.workspace = true
-bindgen.workspace = true
 
 [lints]
 workspace = true

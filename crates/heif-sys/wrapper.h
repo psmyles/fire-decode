@@ -1,15 +1,15 @@
 /*
  * C-ABI wrapper over libheif (HEIC/HEIF via libde265, AVIF via dav1d).
  *
- * Like psd-sdk-sys/wrapper.h, this header is deliberately C-style: it includes only
- * <stdint.h> / <stddef.h> so bindgen's clang parse never touches a C++ standard-library
- * header (avoids the MSVC STL1000 clang-version error). The implementation (wrapper.c)
- * includes <libheif/heif.h> and is compiled by MSVC cl.exe via the cc crate, not clang.
+ * Like psd-sdk-sys/wrapper.h, this header is deliberately C-style, <stdint.h> / <stddef.h>
+ * only. Its Rust side is hand-kept in src/bindings.rs, and a plain C ABI keeps that file small
+ * and its layout checkable from both sides. The implementation (wrapper.c) includes
+ * <libheif/heif.h> and is compiled by the platform's C compiler through the cc crate.
  *
  * The wrapper collapses libheif's multi-call decode (context -> handle -> image -> plane)
  * into a single `fire_heif_decode` that hands Rust an interleaved-RGBA buffer plus the
  * source bit depth and any embedded ICC profile. Buffers are malloc'd C-side and released
- * by `fire_heif_image_free` so allocation/free stay on one heap (both /MD CRT).
+ * by `fire_heif_image_free` so allocation and free stay on one heap (the one CRT the crate links).
  */
 #ifndef FIRE_HEIF_WRAPPER_H
 #define FIRE_HEIF_WRAPPER_H

@@ -1,0 +1,5 @@
+[toolchain]
+# The latest stable when the crate left fire (FD13). Moved on deliberately, with `rust-version`.
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]

@@ -1,8 +1,7 @@
 //! Build script for psd-sdk-sys.
 //!
-//! - bindgen generates Rust FFI declarations from the C-ABI `wrapper.h`. The header is
-//!   C-style (`<stdint.h>` only) so clang-18's parse never touches the MSVC STL (avoids
-//!   STL1000); `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` is passed as belt-and-suspenders.
+//! - The Rust side of the C-ABI `wrapper.h` is committed (`src/bindings.rs`), so nothing here
+//!   needs bindgen or libclang (FD3).
 //! - cc compiles the vendored psd_sdk C++ plus `wrapper.cpp` into a static lib: MSVC on
 //!   Windows (`cl.exe`, not clang, so the STL constraint does not apply there), clang on
 //!   macOS. psd_sdk is already clang-aware (`PsdPch.h` sets `PSD_USE_CLANG`, `PsdPlatform.h`
@@ -15,7 +14,6 @@ use std::path::PathBuf;
 
 fn main() {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let wrapper_h = crate_dir.join("wrapper.h");
     let wrapper_cpp = crate_dir.join("wrapper.cpp");
     let psd_dir = crate_dir.join("vendor").join("Psd");
@@ -26,24 +24,6 @@ fn main() {
     println!("cargo:rerun-if-changed={}", wrapper_cpp.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor");
-
-    // --- bindgen: C-ABI wrapper header -> Rust FFI declarations ------------------
-    let mut builder = bindgen::Builder::default()
-        .header(wrapper_h.to_string_lossy())
-        .clang_arg("-x")
-        .clang_arg("c++")
-        .clang_arg("-std=c++17");
-    if windows {
-        builder = builder.clang_arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
-    }
-    let bindings = builder
-        .allowlist_function("fire_psd_.*")
-        .allowlist_type("fire_psd.*")
-        .generate()
-        .expect("bindgen failed — check that libclang is on PATH / LIBCLANG_PATH is set");
-    bindings
-        .write_to_file(out_dir.join("bindings.rs"))
-        .expect("failed to write generated bindings.rs");
 
     // --- cc: compile vendored psd_sdk + wrapper.cpp -----------------------------
     if !psd_dir.join("Psd.h").exists() {
@@ -60,7 +40,7 @@ fn main() {
         .file(&wrapper_cpp)
         .warnings(false); // third-party code; don't fail/noise on its warnings
 
-    // MSVC C++17 + exceptions. /MD (the cc default) matches Rust's default CRT.
+    // MSVC C++17 + exceptions. cc follows the target's CRT: /MT with crt-static (FD20), else /MD.
     build.flag_if_supported("/std:c++17");
     build.flag_if_supported("/EHsc");
     // clang/gcc C++17 (macOS and any other non-MSVC toolchain).
