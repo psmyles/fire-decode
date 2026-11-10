@@ -121,6 +121,9 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
      - TTFP is no slower anywhere, and the 48 MP HEIC is 21% faster ([`baselines.md`](baselines.md)).
    - **Measured:** libheif's default rendering of PQ / HLG reinterprets the signal, and it doesn't
      convert Display P3 nclx either. Both are recorded in FD17 and FD5.
+   - **Settled after it (10 November):** `Sdr` converts PQ / HLG to SDR itself in step 6b (203
+     cd/m² at white, highlights clipped, sRGB-encoded), so bite's previews of those files will
+     differ from ImageMagick's.
 
 6. **Step 3, the API changes** (setups including `inspect()`, `output` including `Rgba8OrFloat`,
    `source`, `limits`, `hdr`, `fit`, `frames`, `surfaces`, `stored_mips`, `probe()`, thread budget,
