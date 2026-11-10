@@ -149,3 +149,35 @@ cargo build --release --manifest-path bench/bite-import/Cargo.toml
 BITE_MAGICK=../bite/resources/mac/magick/bin/magick \
     bench/bite-import/target/release/bite-import-baseline <format folder> <scratch cache folder> 256
 ```
+
+## Step 1 on macOS: fire on the extracted crate
+
+10 November 2026. fire `710b3f6` was built against this repository's `step-1` branch (`ee4d447`).
+It ran in a scratch clone whose workspace drops its in-tree copies of the three crates and points
+`fire-decode` at this checkout. Rust 1.99.1, macOS libheif 1.23.7 / libde265 1.1.3 / dav1d 1.5.4.
+
+- **fire's tests:** 194 passed, 0 failed (`cargo test --workspace`; the in-tree decode crates are
+  out of that workspace).
+- **The binary:** `minos 11.0`, 10,416,944 bytes (134 KB more than the baseline).
+- **TTFP:** `scripts/ttfp.sh -A local/bin/fire-710b3f6 -B local/bin/fire-step1-ee4d447 -N 12`,
+  same 13 files. Every format decodes, HEIC and AVIF included:
+
+| File | Baseline (ms) | Step 1 (ms) | Change |
+| --- | --- | --- | --- |
+| `28-4928x3264.jpg` | 228.6 | 227.0 | -0.7% |
+| `58-1280x853.jpg` | 221.2 | 224.5 | +1.5% |
+| `T_Clock_D.jpg` | 223.3 | 228.4 | +2.3% |
+| `T_CliffRock_01_N.png` | 241.3 | 241.2 | -0.1% |
+| `T_DeadTree_03_N.png` | 216.1 | 214.6 | -0.7% |
+| `Explosion02HD_5x5.tga` | 214.0 | 217.4 | +1.6% |
+| `FireBall02_8x8.tga` | 216.1 | 211.7 | -2.1% |
+| `IMG_2131.HEIC` | 214.8 | 210.8 | -1.9% |
+| `IMG_2135.HEIC` | 339.2 | 336.8 | -0.7% |
+| `IMG_2139.HEIC` | 215.4 | 211.4 | -1.8% |
+| `IMG_2131.avif` | 217.0 | 207.5 | -4.3% |
+| `T_CliffRock_01_N.exr` | 221.4 | 214.9 | -2.9% |
+| `T_Sides_D.psd` | 207.3 | 205.7 | -0.8% |
+
+No format is slower beyond the harness's noise (up to 4.8% between identical binaries, above).
+The JPEG, PNG and TGA paths are unchanged code. So step 1's macOS gate passes; its Windows half
+waits for the Windows libraries. The raw launches are in `local/ttfp-macos-step1.csv`.

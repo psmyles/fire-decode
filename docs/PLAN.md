@@ -59,8 +59,23 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
      So the macOS test is that no format gets slower, per the user. 3D Review's Windows baselines are
      done (its `docs/PLAN.md`).
 
-3. **Step 1, the parts a Mac can do.** Start only **after fire's Asset Check additions have landed**
-   (fire `docs/PLAN.md` A1), so they come over with the history.
+3. **Step 1, the parts a Mac can do - done** (10 November 2026), on the `step-1` branch.
+   - **What's on the branch:**
+     - fire's three crates with their history (35 commits), the vendored binaries dropped;
+     - a standalone workspace: edition 2024, Rust 1.99.1, 3D Review's lints, no default features;
+     - the macOS HEIF stack re-vendored, from vcpkg `e529425f2f`: libheif 1.23.7, libde265 1.1.3,
+       dav1d 1.5.4, `minos 11.0`, no plugin loading, no encoders;
+     - committed bindings asserted on both sides, with no bindgen;
+     - `links = "fire_psd"`, and heif-sys's target guards;
+     - licence texts and `THIRD-PARTY-NOTICES.md` with the relink section;
+     - the macOS CI job.
+   - **The macOS half of the gate passed.** fire on the extracted crate passes its 194 tests, every
+     format's TTFP is within the noise of the baseline, an AVIF decodes (dav1d linked), and
+     `minos` is 11.0 ([`baselines.md`](baselines.md)).
+   - **Still Windows:** see "Needs Windows".
+
+   What follows is the original list, kept for reference. It started only **after fire's Asset Check
+   additions had landed** (fire `docs/PLAN.md` A1), so they came over with the history.
    - **Extract** `crates/fire-decode`, `crates/psd-sdk-sys` and `crates/heif-sys` from fire with
      `git filter-repo`, keeping their history but **dropping `crates/heif-sys/vendor/*/lib` and
      `vendor/*/include` from it** (FD16).
