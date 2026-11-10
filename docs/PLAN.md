@@ -1,9 +1,9 @@
 # fire-decode - Work Plan
 
 **Status, 10 November 2026:** the crate lives here now (step 1's Mac part), the repository is public,
-and steps 2a, 2b and 3 are done on a Mac; fire builds on step 3's API on its `fire-decode` branch. Everything that needs Windows is collected in
-"Needs Windows", kept current as the Mac work goes, to be done in one stretch afterwards. fire,
-3D Review and bite still decode with their own copies until they move to a tag.
+and steps 2a to 5 are done on a Mac. fire, 3D Review and bite each build on it on a `fire-decode`
+branch, which merges when they move to the first tag. Everything that needs Windows is collected in
+"Needs Windows", kept current as the Mac work goes, to be done in one stretch afterwards.
 
 ## What's here
 
@@ -164,9 +164,29 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
    For it, the crate gained `in_decode()`, so a panic hook can tell a decode's panic, its helper
    threads' included, from any other (FD7).
 
-8. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`; its
+8. **Step 5, bite on `thumbnail()` and `probe()` - done on the Mac** (10 November 2026), on
+   bite's `fire-decode` branch (`5aa3905`), which merges with the first tag. bite has no work plan
+   of its own: the commit message has the change, the plan's FD8-FD10, FD12 and FD19 have it as
+   built, and [`baselines.md`](baselines.md) has the gate:
+   - **Cold import:** faster for every routed format, by 64-96%. JPG, still on ImageMagick, is
+     unchanged.
+   - **Warm re-import:** no `magick` process for any crate format.
+   - **`probe()` against `identify`:** the same size on all 115 files `identify` can read.
+   - **HEIC orientation:** identical to ImageMagick's.
+   - **Thumbnails:** the same picture, ICC kept, alpha where it was.
+   - **Over 30000 px:** still thumbnailed, through ImageMagick.
+   - **Cache size:** three to seven times larger (lossless).
+   - **Two findings:**
+     - Concurrent decodes must each be capped to their share of the cores: a lease is greedy and
+       held for the whole decode (FD8). bite caps them.
+     - ImageMagick un-blends a white matte from any PSD with a 4th merged channel, which is wrong
+       for a flat mask texture. Whether Photoshop's own transparent documents need it is open
+       (plan §6, PSD).
+   - **Decisions for later:** the lossy fallback if 1024 px photo caches prove too big (FD12), and
+     a fairer lease in the crate (FD8).
+
+9. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`; its
    gate's Windows half joins "Needs Windows":
-   - **step 5:** bite adopts `thumbnail()` and `probe()`;
    - **step 6** (fire only, any time after 3): the tonemap's negatives (6a), PQ / HLG to `Linear`
      and to SDR (6b), gain maps (6c), sequences with HEIF progress and cancel in the loading bar
      (6d);
@@ -253,6 +273,20 @@ The Windows stretch, in order. Each item names what it unblocks.
 11. **Step 4's Windows half**: 3D Review's `docs/PLAN.md`, "Needs Windows". Its startup gate and
     import tables, HEIC / AVIF in the viewer and Explorer, and Asset Check reading a
     `review3d-cli` panic's exit code 101 as the tool failing.
+12. **Step 5's Windows half** (bite's `fire-decode` branch; it needs item 2's libraries):
+    - **It builds:** `bite-gui.exe` and `bite.exe` with `crt-static`. Their import tables show no
+      `MSVCP140`, `VCRUNTIME140*` or `api-ms-win-crt-*` (step 0 expected `VCRUNTIME140`, before
+      the static CRT).
+    - **bite's tests** pass, the ImageMagick ones included, against the bundled `magick.exe`.
+    - **Cold and warm import by format:** `bench/bite-import` with `BITE_MAGICK` set to the
+      bundled `magick.exe`, against item 1's baseline. Every routed format faster cold, and no
+      `magick` process on a warm re-import of PNG / TGA / PSD / EXR / HEIC / AVIF.
+    - **The installer** (`cargo xtask package-windows`) ships the new `THIRD_PARTY_LICENSES`. A
+      HEIC folder imports through the HEIC chip in the installed app.
+    - **A transparent PSD saved by Photoshop:** a layered document with no Background layer and
+      some soft-edged transparency, saved with Maximize Compatibility. Compare Photoshop's view
+      with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
+      matte that the crate should divide out (plan §6, PSD)?
 
 ## References
 

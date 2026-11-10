@@ -394,3 +394,94 @@ thumbnail and preview) and through `review-snapshot`, the viewer's renderer
 **Over the GPU limit:** an FBX embedding a 20000×400 texture draws its gradient in
 `review-snapshot`: `texture()` doesn't shrink it, and the upload starts from the first mip within
 Metal's 16384.
+
+## Step 5 on macOS: bite on fire-decode
+
+10 November 2026. bite's `fire-decode` branch (`5aa3905`) against this repository at `00b2247`,
+through the same untracked `[patch]`. Rust 1.99.1, bite's bundled ImageMagick 7.1.2-34. The change
+is in that commit's message; the plan's FD9, FD10, FD12 and FD19 have it as built.
+
+**Tests:** bite's 372 pass and clippy is clean. bite-imagemagick's ImageMagick tests used to skip
+on a Mac (their helper tried the Windows `magick.exe` first); they run now, and two are new: a
+broken file is retried through ImageMagick for both routes, and a 30001×2 PNG, which fire-decode
+refuses, still gets its thumbnail.
+
+**Cold and warm import**, `bench/bite-import` built against bite `b511984` (a worktree) and against
+the branch, run alternately, 5 repetitions, median (`local/bite-import-macos-step5.jsonl`; the
+driver is `local/step5/run-bench.sh`):
+
+| Format | Files | Cold before (ms) | Cold after (ms) | Change | `magick`, cold | Warm before (ms) | Warm after (ms) | `magick`, warm |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| PNG | 5 | 556 | 156 | -72% | 1 → 0 | 3 | 1 | 0 → 0 |
+| TGA | 8 | 390 | 14 | -96% | 1 → 0 | 3 | 1 | 0 → 0 |
+| JPG | 23 | 618 | 612 | -1% | 3 → 3 | 5 | 3 | 0 → 0 |
+| PSD | 2 | 189 | 11 | -94% | 1 → 0 | 127 | 1 | 2 → 0 |
+| EXR | 2 | 847 | 91 | -89% | 1 → 0 | 804 | 1 | 2 → 0 |
+| HEIC | 3 | 624 | 228 | -64% | 1 → 0 | 604 | 1 | 3 → 0 |
+| AVIF | 3 | 713 | 136 | -81% | 1 → 0 | 705 | 1 | 3 → 0 |
+
+Every routed format is faster cold, and no warm re-import of one starts a process. JPG stays on
+ImageMagick. All 46 files at once: 3,094 → 868 ms cold at 256 px, 7,991 → 3,204 ms at 1024 px.
+
+**Concurrent decodes need a cap.** The first run had HEIC 5% *slower* (654 ms). A lease takes the
+threads that are free when a decode starts and keeps them to the end, so the first of three
+concurrent HEICs took nearly every core and the other two ran on one each. Three iPhone HEICs
+through `thumbnail(256)`, by how they were spread:
+
+| Spread | HEIC (ms) | AVIF (ms) | PNG (ms) |
+| --- | --- | --- | --- |
+| one at a time | 243 | 238 | 300 |
+| three at once, uncapped | 637 | 246 | 144 |
+| three at once, 4 threads each | 219 | 120 | 144 |
+
+bite now caps each of its concurrent decodes at the cores divided by the decodes (`max_threads`).
+
+**`probe()` against `identify`:** the bite corpus, bite's `test_images` and the HEIF fixtures, 129
+files (`local/step5/probe-vs-identify.tsv`). All 115 that `identify` reads have the same size. The
+other 14 are files `identify` can't read: malformed fixtures, the size bombs, and the `tmap`-primary
+file. For those `probe()` reports the header's size, the decode fails, and bite leaves the file out
+as before.
+
+**HEIC orientation:** the portrait iPhone photo and the `irot` / `imir` / gain-map portrait fixtures
+come out identical to ImageMagick's thumbnails (MAE 0 on the fixtures; a mirrored copy differs by
+10%). ImageMagick applies `irot` / `imir`, as FD5 expected.
+
+**Thumbnails, old against new**, over the 23 routed files, at 256 px (thumbnail sizes match on every
+file):
+- **The same picture** (`local/step5/thumbs-old-vs-new.png`). The mean difference is 0.2-1.8% for
+  TGA, HEIC, AVIF and `T_Sides_D.psd`, and 4-5% for the normal maps, PNG and EXR, most of it the old
+  files' quality-85 compression. Against ImageMagick's own lossless output the normal maps differ
+  by 1.2%: the area filter against ImageMagick's resize.
+- **ICC:** the HEICs', AVIFs' and `T_Noise_Burshed_01_M.psd`'s profiles are embedded, as before.
+- **Alpha:** present on exactly the files that had it before.
+- **EXR** shows clamped with no curve in both: ImageMagick reads it that way too, so EXR is routed
+  with no sRGB option.
+- **One deliberate difference, `T_Noise_Burshed_01_M.psd`** (11%;
+  `local/step5/psd-noise-im-vs-crate-vs-alpha.png`). It is a flat document whose 4th channel is a
+  mask. ImageMagick treats any 4th channel of the merged image as transparency over a white matte
+  and divides the matte out, which crushes this texture's colour nearly to black. fire-decode
+  keeps the colour as stored, which is right for this file. It is also right for ImageMagick's own
+  RGBA PSD (`local/corpus/big_rgba8_8192.psd`, layer count -1), which ImageMagick un-blends to 0.19
+  where its source is 0.50. A transparent document saved by Photoshop is untested (Needs Windows).
+
+**Cache size**, lossless (with ICC) against the old quality-85 files, per file:
+
+| Format | 256 px before / after (KiB) | 1024 px before / after (KiB) |
+| --- | --- | --- |
+| HEIC, AVIF | 10 / 63 | 106 / 780 |
+| PNG | 18 / 101 | 250 / 1,430 |
+| EXR | 29 / 169 | 423 / 2,514 |
+| PSD | 29 / 108 | 364 / 1,469 |
+| TGA | 31 / 64 | 222 / 693 |
+
+Three to seven times larger. bite's default thumbnail is 256 px, and the cache is pruned after 14
+days.
+
+**The chip grid:** `bite-gui --capture` has a new `input-folder` scene. HEIC sits beside AVIF, off
+by default, and the eleventh chip starts a third row (`local/step5/input-folder-capture.png`).
+
+**Not checked here:**
+- a Linux build of the CLI: `heif` is off there, but psd_sdk needs a Linux C++ compiler, which
+  this Mac doesn't have;
+- `bite-gui.exe`'s and `bite.exe`'s import tables with `crt-static`, the Windows timings and the
+  installer (Needs Windows).
