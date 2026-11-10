@@ -527,3 +527,34 @@ check of its nclx kind.
 **6b in fire:** `pq_lossless.avif` and `hlg_lossless.heic` open in the step 6b build and reach
 their first frame as `Rgba16Float` (the TTFP harness), through the viewer's exposure and tone
 curve. bite and 3D Review still build against the crate unchanged.
+
+## Step 6c on macOS: gain maps
+
+10 November 2026. This repository at `fada526`; fire's `fire-decode` branch at `1ccce64`.
+
+**Fixtures** (`tests/heif_fixtures.rs`, `Hdr::Linear`): all seven gain-map fixtures render
+within 3% of ImageIO's HDR values on their patches (ISO `b` 3.40, Apple `a` 4.00 and `b` 1.66),
+at their displayed sizes, corners in place. `gainmap_both.heic` renders its ISO map. The
+`tmap`-primary file now decodes: its base under `Sdr`, identical to `gainmap_iso.heic`'s.
+
+**Real iPhone photos against ImageIO** (`gainmaps.swift decode`, ImageIO's own HDR rendering,
+compared in 16 px blocks of luminance; `local/step6/gainmap-vs-imageio.txt`):
+
+| Photo | Size | Crate decode | Mean difference | Worst block | Peak, ImageIO / crate |
+| --- | --- | --- | --- | --- | --- |
+| `IMG_2131.HEIC` | 4032×3024 | 99 ms | 0.26% | 1.2% | 1.63 / 1.63 |
+| `IMG_2135.HEIC` | 5712×4284 | 218 ms | 0.21% | 1.4% | 2.01 / 2.01 |
+| `IMG_2139.HEIC` (portrait) | 3024×4032 | 119 ms | 0.26% | 1.4% | 3.14 / 3.15 |
+
+Each carries both maps; the ISO one is used. Apple's MakerNote formula gives 2.0470, 2.6287 and
+3.1499 against the XMP headroom's 2.0469, 2.6285 and 3.1498.
+
+**Nothing else moved:** `texture()` / `thumbnail(256)` output over the same 137 files as 6b
+is identical on 131; the six that differ are the five PQ / HLG fixtures and the `tmap`-primary
+file, which was an error before.
+
+**SDR HEIC TTFP** (`local/ttfp-macos-step6c.csv`, against step 3, 12 launches): `IMG_2131`
+-2.4%, `IMG_2135` -1.4%, `IMG_2139` +2.9%, `grid_iphone` +1.6%. Within noise; the `Sdr` path's
+new work is one parse of the `meta` box.
+
+**fire:** 202 tests (200 without `heif`), clippy clean.
