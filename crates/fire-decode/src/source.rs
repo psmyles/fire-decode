@@ -31,9 +31,10 @@ pub struct SourceInfo {
 }
 
 impl SourceInfo {
-    /// A source with integer samples and no colour signalling of its own: sRGB is presumed.
-    /// [`decode`](crate::decode) marks a float buffer's source `Float` / `Linear` afterwards.
-    pub(crate) fn new(format: Format, name: &'static str, channels: u8, bit_depth: u8) -> Self {
+    /// A source with integer samples and no colour signalling of its own, sRGB presumed, for an
+    /// image an app assembles itself (fire's PSD layer composites). [`decode`](crate::decode) marks
+    /// a float buffer's source `Float` / `Linear` itself.
+    pub fn new(format: Format, name: &'static str, channels: u8, bit_depth: u8) -> Self {
         Self {
             format,
             name,

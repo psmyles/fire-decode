@@ -1,12 +1,13 @@
 //! The process-wide thread budget (FD8).
 //!
-//! One counter of busy threads, capped at the core count, shared by every decode in the process:
+//! One counter of busy threads, capped just under the core count ([`cores`]), shared by every
+//! decode in the process:
 //! - a decode's calling thread holds a [`Seat`] for the whole decode;
 //! - a parallel pass, and each FFI call that starts threads of its own (libheif and its codecs, the
 //!   PSD bridge), takes a [`Lease`] on what is free beyond that, and runs on the calling thread
 //!   alone when nothing is.
 //!
-//! So one big image gets every core, and twenty concurrent decodes get about one each. No rayon:
+//! So one big image gets nearly every core, and twenty concurrent decodes get about one each. No rayon:
 //! it is a counter around the scoped threads the crate already used. The budget is per binary;
 //! the two Explorer DLLs that can share a surrogate process count separately.
 
@@ -17,10 +18,20 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 /// Threads busy on the crate's work right now, callers' threads included.
 static BUSY: AtomicUsize = AtomicUsize::new(0);
 
-/// The machine's hardware threads, at least 1.
+/// The budget's size: the threads the crate's work may keep busy at once, the callers' own decode
+/// threads included. The hardware threads less two, so the app's own UI thread and its GPU
+/// driver's keep a core while a decode runs, but never below the `min(cores, 8)` the crate
+/// used before the budget, so no machine gets fewer threads than it did.
+///
+/// Measured on a 14-core M3 Max, fire's time to first pixel: leasing every core made a 12 MP HEIC
+/// open 2% slower than with the old 8 (the decode was faster, fire's startup on its main thread
+/// slower), while 12 opened it as fast as 8 did and a 48 MP one 7% faster.
 pub(crate) fn cores() -> usize {
-    static CORES: OnceLock<usize> = OnceLock::new();
-    *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+    static SIZE: OnceLock<usize> = OnceLock::new();
+    *SIZE.get_or_init(|| {
+        let hw = std::thread::available_parallelism().map_or(1, |n| n.get());
+        hw.saturating_sub(2).max(hw.min(8)).max(1)
+    })
 }
 
 thread_local! {
