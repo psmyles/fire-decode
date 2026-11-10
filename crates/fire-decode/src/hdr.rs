@@ -92,31 +92,36 @@ pub(crate) fn convert(img: &mut DecodedImage, hdr: Hdr, cx: &Cx) -> Result<(), D
         }
     };
 
+    // Every buffer the image owns: the canvas, and a sequence's frames (FD18).
+    let (w, h) = (img.width as usize, img.height as usize);
     match img.format {
         // Eight bytes in, eight out: in place.
-        PixelFormat::Rgba16Unorm => {
-            budget::par_chunks_mut_heavy(&mut img.pixels, 8, |_, part| {
+        PixelFormat::Rgba16Unorm => img.transform_buffers(w * h * 8, |buf| {
+            budget::par_chunks_mut_heavy(buf, 8, |_, part| {
                 for px in part.as_chunks_mut::<8>().0 {
                     let rgba =
                         std::array::from_fn(|c| u16::from_ne_bytes([px[c * 2], px[c * 2 + 1]]));
                     pixel(rgba, px);
                 }
             });
-        }
-        // An 8-bit PQ / HLG file is rare, but legal: widen into a new buffer.
+        }),
+        // An 8-bit PQ / HLG file is rare, but legal: widen into new buffers.
         PixelFormat::Rgba8Unorm => {
-            cx.check_dims(img.width as usize, img.height as usize, 8, "HEIF")?;
-            let src = std::mem::take(&mut img.pixels);
-            let mut out = vec![0u8; src.len() * 2];
-            budget::par_chunks_mut_heavy(&mut out, 8, |offset, part| {
-                let first = offset / 8;
-                for (i, px) in part.as_chunks_mut::<8>().0.iter_mut().enumerate() {
-                    let s = &src[(first + i) * 4..(first + i) * 4 + 4];
-                    // 8 bits to 16: `v * 257`, so 255 is 65535.
-                    pixel(std::array::from_fn(|c| s[c] as u16 * 257), px);
-                }
+            let frames = img.animation.as_ref().map_or(1, |a| a.frames.len().max(1));
+            cx.check_dims(w, h, 8 * frames, "HEIF")?;
+            img.transform_buffers(w * h * 4, |buf| {
+                let src = std::mem::take(buf);
+                let mut out = vec![0u8; src.len() * 2];
+                budget::par_chunks_mut_heavy(&mut out, 8, |offset, part| {
+                    let first = offset / 8;
+                    for (i, px) in part.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+                        let s = &src[(first + i) * 4..(first + i) * 4 + 4];
+                        // 8 bits to 16: `v * 257`, so 255 is 65535.
+                        pixel(std::array::from_fn(|c| s[c] as u16 * 257), px);
+                    }
+                });
+                *buf = out;
             });
-            img.pixels = out;
         }
         _ => return Ok(()),
     }

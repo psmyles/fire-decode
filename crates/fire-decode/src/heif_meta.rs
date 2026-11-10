@@ -322,6 +322,45 @@ impl<'a> Meta<'a> {
     }
 }
 
+/// What an image sequence's first visual track says of itself, from the `moov` box's body: how
+/// many samples it has (`stsz` / `stz2`), for progress, and its sample entry's nclx colour as
+/// `(primaries, transfer)`, so a PQ / HLG sequence converts like a still (FD18).
+pub(crate) fn track_facts(moov: &[u8]) -> (Option<u32>, Option<(u16, u16)>) {
+    for (kind, trak, _) in boxes(moov) {
+        if kind != *b"trak" {
+            continue;
+        }
+        let Some(mdia) = child(trak, b"mdia") else {
+            continue;
+        };
+        // `hdlr`: version and flags, pre_defined, then the handler type.
+        let visual = child(mdia, b"hdlr")
+            .and_then(|h| h.get(8..12))
+            .is_some_and(|t| t == b"pict" || t == b"vide");
+        if !visual {
+            continue;
+        }
+        let Some(stbl) = child(mdia, b"minf").and_then(|m| child(m, b"stbl")) else {
+            return (None, None);
+        };
+        // `stsz`: full box, sample size, count; `stz2`: full box, 3 reserved + field size, count.
+        let count = child(stbl, b"stsz")
+            .and_then(|b| be32(b, 8))
+            .or_else(|| child(stbl, b"stz2").and_then(|b| be32(b, 8)));
+        // `stsd`: full box, entry count, then the entries. A visual sample entry's children start
+        // 78 bytes in: 8 of SampleEntry, 70 of VisualSampleEntry.
+        let nclx = child(stbl, b"stsd")
+            .and_then(|b| boxes(b.get(8..)?).next())
+            .and_then(|(_, entry, _)| {
+                boxes(entry.get(78..)?)
+                    .find(|(k, b, _)| k == b"colr" && b.starts_with(b"nclx"))
+                    .and_then(|(_, b, _)| Some((be16(b, 4)? as u16, be16(b, 6)? as u16)))
+            });
+        return (count, nclx);
+    }
+    (None, None)
+}
+
 fn parse_iinf(b: &[u8]) -> Result<Vec<Item>, DecodeError> {
     let version = *b.first().ok_or_else(|| bad("short iinf"))?;
     let start = if version == 0 { 6 } else { 8 };

@@ -335,8 +335,9 @@ pub struct AnimationFrame {
     pub delay_ms: u32,
 }
 
-/// Multi-frame animation for an animated source (currently animated GIF). Present on a
-/// [`DecodedImage`] only when the source has more than one frame.
+/// Multi-frame animation for an animated source: an animated GIF, or a HEIF / AVIF image sequence
+/// with [`Frames::All`] (FD18). Present on a [`DecodedImage`] only when the source has more than
+/// one frame.
 #[derive(Debug, Clone)]
 pub struct Animation {
     /// Every frame in play order (frame 0 included, matching [`DecodedImage::pixels`]). Each is a
@@ -345,6 +346,10 @@ pub struct Animation {
     /// Whether the sequence was cut short by a cap: 1 GiB of frames (less under a setup's own
     /// `max_bytes`) or 10,000 of them (FD18). The frames kept still play.
     pub truncated: bool,
+    /// How many times to play the frames, or `None` to loop forever: a HEIF sequence's
+    /// repetitions. A GIF is `None` (the `image` crate doesn't read its loop count), as every
+    /// animation was before. Looping is the caller's: the crate decodes the frames once.
+    pub loop_count: Option<u32>,
 }
 
 impl DecodedImage {
@@ -1185,6 +1190,20 @@ fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, De
         .as_ref()
         .zip(base)
         .and_then(|(m, b)| m.gain_map(b).map(|g| (b, g)));
+    // With `frames: All`, an image sequence plays rather than its still (FD18). One that can't be
+    // read leaves the still, when the file has one; a cancel or a refusal on size stands.
+    if cx.opts.frames == Frames::All
+        && let Some(moov) = heif_meta::boxes(bytes)
+            .find(|b| b.0 == *b"moov")
+            .map(|b| b.1)
+    {
+        match decode_heif_sequence(bytes, moov, format, cx) {
+            Ok(img) => return Ok(img),
+            Err(e @ (DecodeError::Cancelled | DecodeError::TooLarge(_))) => return Err(e),
+            Err(e) if meta.as_ref().and_then(|m| m.primary).is_none() => return Err(e),
+            Err(_) => {}
+        }
+    }
     // Under `Linear` a gain-map photo renders as HDR. A gain map that can't be read leaves the
     // SDR base, as `Sdr` shows it; a cancel or a refusal on size stands.
     if let (Hdr::Linear, Some(m), Some((b, g))) = (cx.opts.hdr, &meta, gain_map) {
@@ -1273,6 +1292,142 @@ fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, De
         source_mips: None,
         layout: None,
         animation: None,
+    };
+    hdr::convert(&mut img, cx.opts.hdr, cx)?;
+    Ok(img)
+}
+
+/// An image sequence (`avis`, or HEIF's `msf1`), every frame of its first visual track as
+/// [`Animation`] frames (FD18). The track's media timeline is played once, its edit list ignored,
+/// so an infinitely looping file ends; the repetitions become [`Animation::loop_count`]. Frames
+/// arrive without a count, so GIF's caps (1 GiB of frames, 10,000 of them) are applied as they
+/// arrive, and a cut is [`Animation::truncated`]. Progress is per frame, against the track's
+/// sample count; cancel is polled between frames and by libheif within one. A PQ / HLG track is
+/// converted frame by frame, as a still is (FD17).
+#[cfg(feature = "heif")]
+fn decode_heif_sequence(
+    bytes: &[u8],
+    moov: &[u8],
+    format: Format,
+    cx: &Cx,
+) -> Result<DecodedImage, DecodeError> {
+    use heif_sys::HeifError;
+    let (count, nclx) = heif_meta::track_facts(moov);
+    let lim = cx.limits();
+    let limits = heif_sys::Limits {
+        max_dim: lim.max_dim,
+        max_output_bytes: lim.max_bytes,
+        max_total_memory: lim.max_bytes.saturating_mul(2),
+        max_tiles: 0,
+        max_sequence_frames: MAX_ANIMATION_FRAMES as u32,
+        max_color_profile_size: 0,
+    };
+    let lease = budget::lease(budget::cores());
+    let cancel = || cx.cancelled();
+    let ctl = heif_sys::Ctl {
+        library_threads: lease.threads(),
+        cancel: Some(&cancel),
+        ..heif_sys::Ctl::default()
+    };
+    let err = |e: HeifError| match e {
+        HeifError::TooLarge => DecodeError::TooLarge(e.to_string()),
+        HeifError::Cancelled => DecodeError::Cancelled,
+        HeifError::OutOfMemory { .. } => DecodeError::Other(e.to_string()),
+        e => DecodeError::Malformed(e.to_string()),
+    };
+    let mut file = heif_sys::HeifFile::open(bytes, &limits).map_err(err)?;
+    let mut track = file.first_track().map_err(err)?;
+    let info = track.info().map_err(err)?;
+    let first = track
+        .next_frame(&ctl)
+        .map_err(err)?
+        .ok_or_else(|| DecodeError::Malformed("HEIF: the sequence has no frames".into()))?;
+    let bpp = if first.is_16bit { 8 } else { 4 };
+    cx.check_dims(first.width as usize, first.height as usize, bpp, "HEIF")?;
+    let frame_bytes = (first.width as u64 * first.height as u64 * bpp as u64).max(1);
+    let sequence_bytes = MAX_ANIMATION_BYTES.min(lim.max_bytes);
+    let max_frames = ((sequence_bytes / frame_bytes) as usize).clamp(1, MAX_ANIMATION_FRAMES);
+    let total = count.filter(|&n| n > 0);
+    let report = |done: usize| {
+        cx.progress(match total {
+            Some(n) => (done as f32 / n as f32).min(1.0),
+            // No count: rise towards 1 without reaching it.
+            None => 1.0 - 1.0 / (done as f32 + 1.0),
+        })
+    };
+    report(1);
+    let mut truncated = false;
+    let (w, h, is_16bit, bit_depth) = (first.width, first.height, first.is_16bit, first.bit_depth);
+    let delay = |d: u32| {
+        let ms = (d as u64 * 1000 + info.timescale as u64 / 2)
+            .checked_div(info.timescale as u64)
+            .unwrap_or(0);
+        if ms == 0 {
+            100
+        } else {
+            ms.min(u32::MAX as u64) as u32
+        }
+    };
+    let mut frames = vec![AnimationFrame {
+        delay_ms: delay(first.duration),
+        pixels: first.pixels,
+    }];
+    while frames.len() < max_frames {
+        cx.check_cancel()?;
+        let Some(frame) = track.next_frame(&ctl).map_err(err)? else {
+            break;
+        };
+        // A frame of another size or depth can't share the canvas: the sequence stops there.
+        if (frame.width, frame.height, frame.is_16bit) != (w, h, is_16bit) {
+            truncated = true;
+            break;
+        }
+        frames.push(AnimationFrame {
+            delay_ms: delay(frame.duration),
+            pixels: frame.pixels,
+        });
+        report(frames.len());
+    }
+    // The cap cut it short when the track has samples left. Without a count, a frame that would
+    // have been next is assumed.
+    if frames.len() >= max_frames {
+        truncated |= total.is_none_or(|n| n as usize > frames.len());
+    }
+    drop(track);
+    drop(lease);
+
+    let mut source = SourceInfo::new(
+        format,
+        format.name(),
+        if info.has_alpha { 4 } else { 3 },
+        bit_depth,
+    );
+    if let Some((primaries, transfer)) = nclx {
+        (source.transfer, source.primaries, source.hdr) = source::from_nclx(transfer, primaries);
+    }
+    let pixels = frames[0].pixels.clone();
+    let animation = (frames.len() > 1).then(|| Animation {
+        frames,
+        truncated,
+        loop_count: (info.repetitions != heif_sys::REPETITIONS_INFINITE)
+            .then_some(info.repetitions),
+    });
+    let mut img = DecodedImage {
+        pixels,
+        width: w,
+        height: h,
+        format: if is_16bit {
+            PixelFormat::Rgba16Unorm
+        } else {
+            PixelFormat::Rgba8Unorm
+        },
+        source,
+        icc: None,
+        alpha_opaque: false, // set by `decode` after the final buffer is built
+        downscaled_from: None,
+        source_mips: None,
+        layout: None,
+        animation,
     };
     hdr::convert(&mut img, cx.opts.hdr, cx)?;
     Ok(img)
@@ -2290,6 +2445,7 @@ fn decode_gif(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
             })
             .collect(),
         truncated,
+        loop_count: None,
     });
 
     Ok(DecodedImage {

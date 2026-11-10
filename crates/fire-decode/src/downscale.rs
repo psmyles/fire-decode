@@ -408,6 +408,7 @@ mod tests {
                 },
             ],
             truncated: false,
+            loop_count: None,
         });
         to_fit(&mut img, 16384);
         assert_eq!((img.width, img.height), (16384, 8192));
@@ -426,6 +427,7 @@ mod tests {
                 delay_ms: 10,
             }],
             truncated: false,
+            loop_count: None,
         });
         to_fit(&mut img, 16384);
         assert_eq!((img.width, img.height), (16384, 8192));

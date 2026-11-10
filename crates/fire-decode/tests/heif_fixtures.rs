@@ -426,3 +426,100 @@ fn gain_map_photos_stay_sdr_by_default() {
         assert_eq!(p.hdr, HdrKind::GainMap, "{name}");
     }
 }
+
+/// Step 6d's gate (FD18): with `frames: All` a sequence plays every frame of its track, once (an
+/// infinitely looping file ends), with its delays and loop count; `First` takes the still.
+#[test]
+fn sequences_decode_their_frames_once() {
+    let files = expected();
+    let mut all = DecodeOptions::inspect();
+    all.frames = fire_decode::Frames::All;
+    for (name, loop_count) in [
+        ("seq_infinite.avif", None),
+        ("seq_only.avif", None),
+        ("seq_hevc.heif", Some(3)),
+    ] {
+        let e = &files[name];
+        let img = decode_with(name, &all).unwrap_or_else(|err| panic!("{name}: {err}"));
+        let anim = img
+            .animation
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}: no animation"));
+        let colours = e["frames"].as_array().unwrap();
+        assert_eq!(anim.frames.len(), colours.len(), "{name}: frames");
+        assert!(!anim.truncated, "{name}");
+        assert_eq!(anim.loop_count, loop_count, "{name}: loop count");
+        let ms = e["frame_ms"].as_u64().unwrap() as u32;
+        for (i, (frame, want)) in anim.frames.iter().zip(colours).enumerate() {
+            assert_eq!(frame.delay_ms, ms, "{name}: frame {i} delay");
+            let one = DecodedImage {
+                pixels: frame.pixels.clone(),
+                animation: None,
+                ..img.clone()
+            };
+            let got = pixel(&one, 32, 32);
+            for c in 0..3 {
+                let want = want[c].as_f64().unwrap() as f32 / 255.0;
+                assert!(
+                    (got[c] - want).abs() < 0.06,
+                    "{name}: frame {i} is {got:?}, expected {want}"
+                );
+            }
+        }
+        // `First`: the still primary, or a sequence-only file's first frame; no animation.
+        let first = decode_with(name, &DecodeOptions::inspect()).unwrap();
+        assert!(first.animation.is_none(), "{name}");
+    }
+}
+
+/// A cap cuts the sequence short and says so: 17 frames of 4096² RGBA8 (64 MiB each) under a
+/// 256 MiB budget keep 4. (The real cap, 1 GiB, keeps 16; the smaller budget spares the memory.)
+#[test]
+fn a_capped_sequence_is_flagged_truncated() {
+    let mut opts = DecodeOptions::inspect();
+    opts.frames = fire_decode::Frames::All;
+    opts.limits.max_bytes = 256 << 20;
+    let img = decode_with("seq_over_cap.avif", &opts).unwrap();
+    let anim = img.animation.unwrap();
+    assert_eq!(anim.frames.len(), 4);
+    assert!(anim.truncated);
+    assert_eq!(anim.loop_count, Some(1));
+}
+
+/// Progress through a sequence only rises, frame by frame, to 1; a cancel stops it between frames.
+#[test]
+fn sequence_progress_rises_and_cancel_stops_it() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut opts = DecodeOptions::inspect();
+    opts.frames = fire_decode::Frames::All;
+    let bytes = std::fs::read(fixtures().join("seq_hevc.heif")).unwrap();
+    let seen = Mutex::new(Vec::new());
+    let progress = |p: f32| seen.lock().unwrap().push(p);
+    let ctl = fire_decode::DecodeCtl {
+        progress: &progress,
+        cancel: &|| false,
+    };
+    fire_decode::decode_with_progress(&bytes, Some("heif"), &opts, &ctl).unwrap();
+    let seen = seen.into_inner().unwrap();
+    assert!(seen.len() >= 6, "{seen:?}");
+    assert!(seen.windows(2).all(|w| w[1] >= w[0]), "{seen:?}");
+    assert_eq!(seen.last().copied(), Some(1.0), "{seen:?}");
+
+    // Cancelled once the first frame is in: the rest are never decoded.
+    opts.limits.max_bytes = 256 << 20;
+    let big = std::fs::read(fixtures().join("seq_over_cap.avif")).unwrap();
+    let started = AtomicBool::new(false);
+    let progress = |p: f32| {
+        if p > 0.0 {
+            started.store(true, Ordering::Relaxed);
+        }
+    };
+    let cancel = || started.load(Ordering::Relaxed);
+    let ctl = fire_decode::DecodeCtl {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    let result = fire_decode::decode_with_progress(&big, Some("avif"), &opts, &ctl);
+    assert!(matches!(result, Err(DecodeError::Cancelled)), "{result:?}");
+}
