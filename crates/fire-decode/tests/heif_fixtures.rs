@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 
-use fire_decode::{DecodeError, DecodeOptions, DecodedImage, decode};
+use fire_decode::{
+    DecodeError, DecodeOptions, DecodedImage, Hdr, HdrKind, PixelFormat, Primaries, Sample, decode,
+};
 use serde_json::Value;
 
 fn fixtures() -> PathBuf {
@@ -41,10 +43,29 @@ fn pixel(img: &DecodedImage, x: usize, y: usize) -> [f32; 4] {
             };
             [s(0), s(1), s(2), s(3)]
         }
+        fire_decode::PixelFormat::Rgba16Float => {
+            let s = |c: usize| {
+                let b = &img.pixels[(i + c) * 2..(i + c) * 2 + 2];
+                half_to_f32(u16::from_ne_bytes([b[0], b[1]]))
+            };
+            [s(0), s(1), s(2), s(3)]
+        }
         _ => {
             let s = |c: usize| img.pixels[i + c] as f32 / 255.0;
             [s(0), s(1), s(2), s(3)]
         }
+    }
+}
+
+/// IEEE half to f32, for reading `Rgba16Float` without a dependency.
+fn half_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = (h >> 10) & 0x1f;
+    let frac = (h & 0x3ff) as f32;
+    sign * match exp {
+        0 => frac * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        e => (1.0 + frac / 1024.0) * 2f32.powi(e as i32 - 15),
     }
 }
 
@@ -180,5 +201,157 @@ fn premultiplied_alpha_comes_back_straight() {
                 p[c]
             );
         }
+    }
+}
+
+/// The PQ / HLG fixtures, with how far a decoded patch may sit from `expected.json`: the lossless
+/// ones keep exact code values, `pq_ycbcr.avif` is lossy YCbCr as such files usually come.
+const HDR_FIXTURES: &[(&str, f32)] = &[
+    ("pq_lossless.heic", 0.002),
+    ("pq_lossless.avif", 0.002),
+    ("hlg_lossless.heic", 0.002),
+    ("hlg_lossless.avif", 0.002),
+    ("pq_ycbcr.avif", 0.02),
+];
+
+fn decode_with(name: &str, opts: &DecodeOptions) -> Result<DecodedImage, DecodeError> {
+    let bytes = std::fs::read(fixtures().join(name)).expect("read fixture");
+    decode(&bytes, name.rsplit('.').next(), opts)
+}
+
+/// Each patch's centre against `want`, relative to the larger of the two plus a floor.
+fn check_patches(
+    name: &str,
+    img: &DecodedImage,
+    tolerance: f32,
+    want: impl Fn(&Value) -> [f32; 3],
+) {
+    let files = expected();
+    for patch in files[name]["patches"].as_array().unwrap() {
+        let at = |k: &str| patch[k].as_u64().unwrap() as usize;
+        let (x, y) = (at("x") + at("size") / 2, at("y") + at("size") / 2);
+        let got = pixel(img, x, y);
+        let want = want(patch);
+        for c in 0..3 {
+            let off = (got[c] - want[c]).abs();
+            let allowed = tolerance * got[c].abs().max(want[c].abs()) + tolerance / 10.0;
+            assert!(
+                off <= allowed,
+                "{name}: patch at ({x}, {y}) channel {c} is {}, expected {} (codes {})",
+                got[c],
+                want[c],
+                patch["code10"]
+            );
+        }
+        assert!((got[3] - 1.0).abs() < 1e-3, "{name}: alpha {}", got[3]);
+    }
+}
+
+fn linear_709(patch: &Value) -> [f32; 3] {
+    [0, 1, 2].map(|c| patch["linear_bt709"][c].as_f64().unwrap() as f32)
+}
+
+/// Step 6b's gate (FD17): `Linear` holds light in Rec.709, 203 cd/m² = 1.0, colours outside
+/// Rec.709 kept, negatives included, as `expected.json` computes it from each patch's codes.
+#[test]
+fn pq_and_hlg_decode_to_linear_light() {
+    let mut opts = DecodeOptions::inspect();
+    opts.hdr = Hdr::Linear;
+    for &(name, tolerance) in HDR_FIXTURES {
+        let img = decode_with(name, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(img.format, PixelFormat::Rgba16Float, "{name}");
+        let kind = if name.starts_with("pq") {
+            HdrKind::Pq
+        } else {
+            HdrKind::Hlg
+        };
+        assert_eq!(img.source.hdr, kind, "{name}");
+        assert_eq!(img.source.primaries, Primaries::Bt2020, "{name}");
+        assert_eq!(
+            img.source.sample,
+            Sample::Unorm,
+            "{name}: the file is still 10-bit"
+        );
+        assert_eq!(img.source.bit_depth, 10, "{name}");
+        assert!(img.icc.is_none(), "{name}");
+        check_patches(name, &img, tolerance, linear_709);
+    }
+}
+
+/// `Sdr`: the same light clipped at 1.0 and sRGB-encoded, so 203 cd/m² is white.
+#[test]
+fn pq_and_hlg_decode_to_sdr_with_reference_white_at_white() {
+    let srgb = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    for &(name, tolerance) in HDR_FIXTURES {
+        let img = decode_with(name, &DecodeOptions::inspect()).unwrap();
+        assert_eq!(img.format, PixelFormat::Rgba16Unorm, "{name}");
+        check_patches(name, &img, tolerance, |p| linear_709(p).map(srgb));
+        // The reference-white patch (third from the right for PQ, sixth for HLG) is white.
+        let patches = &expected()[name]["patches"];
+        let white = patches
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| (p["nits_bt2020"][0].as_f64().unwrap() - 203.0).abs() < 1.0)
+            .unwrap_or_else(|| panic!("{name}: no 203 cd/m² patch"));
+        let at = |k: &str| white[k].as_u64().unwrap() as usize;
+        let got = pixel(&img, at("x") + 16, at("y") + 16);
+        let floor = if tolerance > 0.01 { 0.99 } else { 0.999 };
+        assert!(
+            got[..3].iter().all(|&v| v >= floor),
+            "{name}: white is {got:?}"
+        );
+    }
+}
+
+/// The setups narrow the `Sdr` result like any 16-bit image, and `Linear` refuses `Rgba8`.
+#[test]
+fn hdr_outputs_per_setup() {
+    let name = "pq_lossless.heic";
+    for opts in [DecodeOptions::texture(), DecodeOptions::thumbnail(64)] {
+        let img = decode_with(name, &opts).unwrap();
+        assert_eq!(img.format, PixelFormat::Rgba8Unorm);
+    }
+    let mut texture = DecodeOptions::texture();
+    texture.hdr = Hdr::Linear;
+    assert_eq!(
+        decode_with(name, &texture).unwrap().format,
+        PixelFormat::Rgba16Float
+    );
+    let mut thumbnail = DecodeOptions::thumbnail(64);
+    thumbnail.hdr = Hdr::Linear;
+    assert!(matches!(
+        decode_with(name, &thumbnail),
+        Err(DecodeError::Other(_))
+    ));
+    // An SDR file decodes the same either way.
+    let mut viewer = DecodeOptions::viewer();
+    let sdr = decode_with("depth10.heic", &viewer).unwrap();
+    viewer.hdr = Hdr::Linear;
+    let linear = decode_with("depth10.heic", &viewer).unwrap();
+    assert_eq!((sdr.format, &sdr.pixels), (linear.format, &linear.pixels));
+}
+
+/// `probe()` names the HDR kind before decoding, so an app can choose its `Hdr` (FD17).
+#[test]
+fn probe_reports_pq_and_hlg() {
+    for (name, kind) in [
+        ("pq_lossless.heic", HdrKind::Pq),
+        ("pq_ycbcr.avif", HdrKind::Pq),
+        ("hlg_lossless.avif", HdrKind::Hlg),
+        ("depth10.heic", HdrKind::None),
+        ("p3_nclx.avif", HdrKind::None),
+        ("portrait_irot.heic", HdrKind::None),
+    ] {
+        let file = std::fs::File::open(fixtures().join(name)).unwrap();
+        let p = fire_decode::probe(std::io::BufReader::new(file), name.rsplit('.').next()).unwrap();
+        assert_eq!(p.hdr, kind, "{name}");
     }
 }

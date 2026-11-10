@@ -61,6 +61,8 @@ mod dds;
 mod downscale;
 mod exif;
 mod format;
+#[cfg(feature = "heif")]
+mod hdr;
 #[cfg(feature = "icc")]
 mod icc;
 mod narrow;
@@ -680,6 +682,12 @@ fn decode_inner(
     opts: &DecodeOptions,
     ctl: &DecodeCtl<'_>,
 ) -> Result<DecodedImage, DecodeError> {
+    if opts.hdr == Hdr::Linear && opts.output == Output::Rgba8 {
+        return Err(DecodeError::Other(
+            "Hdr::Linear needs an output that keeps float (Native or Rgba8OrFloat), not Rgba8"
+                .into(),
+        ));
+    }
     let progress = Progress::new(ctl.progress);
     let cx = Cx {
         opts,
@@ -740,8 +748,9 @@ fn decode_inner(
     cx.check_cancel()?;
 
     // A float buffer is linear light (OpenEXR, Radiance HDR, float TIFF, 32-bit PSD, PFM); say so
-    // before narrowing can turn it into bytes.
-    if img.format.is_hdr() {
+    // before narrowing can turn it into bytes. Not a PQ / HLG source decoded to light: its file is
+    // still the integer signal its nclx box describes.
+    if img.format.is_hdr() && !matches!(img.source.hdr, HdrKind::Pq | HdrKind::Hlg) {
         img.source.sample = Sample::Float;
         if img.source.transfer == Transfer::Srgb {
             img.source.transfer = Transfer::Linear;
@@ -1133,7 +1142,8 @@ fn decode_exr(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
 /// 8-bit sources come back as `Rgba8Unorm`; 10/12-bit as `Rgba16Unorm` scaled to full range. The
 /// nclx box, when there is one, describes the source's transfer and primaries. libheif applies
 /// the YCbCr matrix but converts neither (measured in step 2b): a Display P3 file comes back in
-/// P3 for the `icc` pass to convert, and a PQ / HLG one as the encoded signal until step 6b.
+/// P3 for the `icc` pass to convert, and a PQ / HLG one as the encoded signal, which
+/// [`hdr::convert`] decodes to light for the setup's [`Hdr`] (FD17, step 6b).
 #[cfg(feature = "heif")]
 fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use heif_sys::HeifError;
@@ -1202,7 +1212,7 @@ fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, De
         (source.transfer, source.primaries, source.hdr) =
             source::from_nclx(nclx.transfer_characteristics, nclx.colour_primaries);
     }
-    Ok(DecodedImage {
+    let mut img = DecodedImage {
         pixels: img.pixels,
         width: img.width,
         height: img.height,
@@ -1214,7 +1224,9 @@ fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, De
         source_mips: None,
         layout: None,
         animation: None,
-    })
+    };
+    hdr::convert(&mut img, cx.opts.hdr, cx)?;
+    Ok(img)
 }
 
 /// Stand-in for [`decode_heif`] when the crate is built without the vendored libheif stack —

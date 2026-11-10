@@ -11,7 +11,7 @@
 
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
-use crate::{Backend, DecodeError, Format};
+use crate::{Backend, DecodeError, Format, HdrKind};
 
 /// What [`probe`] reads from a file's headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,10 @@ pub struct Probe {
     pub width: u32,
     pub height: u32,
     pub format: Format,
+    /// Whether the image is HDR, and how (FD17): what an app needs to choose its
+    /// [`Hdr`](crate::Hdr) before decoding. PQ and HLG come from a HEIF primary item's nclx
+    /// colour box; every other format, and a HEIF without one, is `None`. Gain maps are step 6c's.
+    pub hdr: HdrKind,
 }
 
 /// The size and format of the image `reader` holds, from its headers alone. The size is what
@@ -48,6 +52,7 @@ fn probe_inner<R: Read + Seek>(r: &mut R, ext: Option<&str>) -> Result<Probe, De
         return Err(DecodeError::Unsupported(format));
     }
     let short = || DecodeError::Malformed(format!("{} header is truncated", format.name()));
+    let mut hdr = HdrKind::None;
     let (width, height) = match backend {
         Backend::Psd => {
             // `8BPS`, version, 6 reserved bytes, channels, then height and width.
@@ -58,7 +63,11 @@ fn probe_inner<R: Read + Seek>(r: &mut R, ext: Option<&str>) -> Result<Probe, De
             (be32(18).ok_or_else(short)?, be32(14).ok_or_else(short)?)
         }
         Backend::Exr => exr_dims(r)?,
-        Backend::Heif(_) => heif::dims(r, len)?,
+        Backend::Heif(_) => {
+            let (w, h, kind) = heif::dims(r, len)?;
+            hdr = kind;
+            (w, h)
+        }
         Backend::Raw(_) => raw_dims(r)?,
         Backend::Dds => crate::dds::probe_dims(&head, len as usize)?,
         Backend::Tiff => {
@@ -123,6 +132,7 @@ fn probe_inner<R: Read + Seek>(r: &mut R, ext: Option<&str>) -> Result<Probe, De
         width,
         height,
         format,
+        hdr,
     })
 }
 
@@ -255,7 +265,7 @@ fn raw_dims<R: Read + Seek>(_r: &mut R) -> Result<(u32, u32), DecodeError> {
 mod heif {
     use std::io::{Read, Seek, SeekFrom};
 
-    use crate::DecodeError;
+    use crate::{DecodeError, HdrKind};
 
     /// The most of a `meta` or `moov` box read into memory. Real ones are kilobytes; a sequence's
     /// sample tables, megabytes.
@@ -265,7 +275,12 @@ mod heif {
         DecodeError::Malformed(format!("HEIF: {what}"))
     }
 
-    pub(super) fn dims<R: Read + Seek>(r: &mut R, len: u64) -> Result<(u32, u32), DecodeError> {
+    /// The primary item's displayed size and HDR kind, or a sequence-only file's first track's
+    /// size (whose HDR kind isn't read).
+    pub(super) fn dims<R: Read + Seek>(
+        r: &mut R,
+        len: u64,
+    ) -> Result<(u32, u32, HdrKind), DecodeError> {
         let mut meta = None;
         let mut moov = None;
         let mut pos = 0u64;
@@ -308,7 +323,7 @@ mod heif {
             return Ok(d);
         }
         match &moov {
-            Some(moov) => track_dims(moov),
+            Some(moov) => track_dims(moov).map(|(w, h)| (w, h, HdrKind::None)),
             None => Err(bad("no primary image and no track")),
         }
     }
@@ -350,7 +365,7 @@ mod heif {
     }
 
     /// `None` when the file has no primary item.
-    fn primary_dims(meta: &[u8]) -> Result<Option<(u32, u32)>, DecodeError> {
+    fn primary_dims(meta: &[u8]) -> Result<Option<(u32, u32, HdrKind)>, DecodeError> {
         // `meta` is a full box: version and flags, then its children.
         let meta = meta.get(4..).ok_or_else(|| bad("empty meta box"))?;
         let Some(pitm) = child(meta, b"pitm") else {
@@ -417,6 +432,8 @@ mod heif {
             be32(ispe, 4).ok_or_else(|| bad("short ispe"))?,
             be32(ispe, 8).ok_or_else(|| bad("short ispe"))?,
         );
+        let mut hdr = HdrKind::None;
+        let mut nclx_seen = false;
         for &i in &assoc {
             let Some((kind, body)) = prop(i) else {
                 continue;
@@ -438,10 +455,20 @@ mod heif {
                         (w, h) = (cw.min(w), ch.min(h));
                     }
                 }
+                // `nclx`, then colour primaries, transfer characteristics and matrix, u16 each
+                // (H.273 code points). The first nclx is the one libheif uses, as here.
+                b"colr" if body.starts_with(b"nclx") && !nclx_seen => {
+                    nclx_seen = true;
+                    hdr = match be16(body, 6) {
+                        Some(16) => HdrKind::Pq,
+                        Some(18) => HdrKind::Hlg,
+                        _ => HdrKind::None,
+                    };
+                }
                 _ => {}
             }
         }
-        Ok(Some((w, h)))
+        Ok(Some((w, h, hdr)))
     }
 
     /// The first visual track's sample size (`moov/trak/mdia/minf/stbl/stsd`'s first entry).

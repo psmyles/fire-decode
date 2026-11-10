@@ -44,13 +44,22 @@ pub enum Output {
     Rgba8OrFloat,
 }
 
-/// How HDR sources come back (FD17). Only `Sdr` exists until step 6b adds `Linear`.
+/// How HDR sources come back (FD17). It changes only HDR sources: a PQ or HLG HEIF / AVIF, and
+/// (from step 6c) a photo with a gain map. Every other file decodes the same either way.
+/// [`probe`](crate::probe) tells which kind a file is before it is decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Hdr {
-    /// An SDR picture. Until step 6b a PQ / HLG HEIF comes back as libheif hands it over, the
-    /// encoded signal unconverted; from 6b the crate converts it (FD17).
+    /// An SDR picture. A PQ / HLG source is decoded to light, put at 203 cd/m² (BT.2408's
+    /// reference white) = white, clipped there, converted to Rec.709 and sRGB-encoded, into
+    /// `Rgba16Unorm` for [`output`](DecodeOptions::output) to narrow. No tone curve: the highlights
+    /// above reference white are what an SDR rendering gives up. A gain-map photo is its SDR base.
     Sdr,
+    /// HDR as linear light: a PQ / HLG source comes back as `Rgba16Float`, Rec.709 primaries,
+    /// 203 cd/m² = 1.0, colours outside Rec.709 kept, negatives included (a viewer's tone curve
+    /// must clamp them). PQ's 10,000 cd/m² peak is about 49. Needs an output that keeps float:
+    /// with [`Output::Rgba8`] the decode is refused.
+    Linear,
 }
 
 /// The filter a [`Fit`] shrinks with (FD6).
