@@ -1,0 +1,19 @@
+# bite's folder import, measured as bite-gui does one (fire-decode plan §6): see src/main.rs.
+# Not part of any workspace. It builds against a bite checkout beside this repository:
+#   cargo build --release --manifest-path bench/bite-import/Cargo.toml
+# Copy bite's Cargo.lock beside this file first, so the versions match bite's own build.
+[package]
+name = "bite-import-baseline"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+bite-gui = { path = "../../../bite/crates/bite-gui" }
+bite-imagemagick = { path = "../../../bite/crates/bite-imagemagick" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -47,13 +47,17 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
        agree: bite's `test_images/IMG_2131`, `IMG_2135` and `IMG_2139.HEIC`, the last a portrait.
      - **Still to collect, for the local corpus:** an Android ISO-gain-map AVIF and ICC-tagged HEICs.
        They stay out of the repository.
-   - **Record macOS baselines:** fire TTFP per format (fire's `scripts/ttfp.sh`), plus 3D Review's
-     startup gate and binary sizes. 3D Review's Windows baselines are done (its `docs/PLAN.md`).
-   - **bite's baselines:** cold and warm import by format, counting `magick` processes.
-     - The corpus needs PSD, EXR and HEIF files. bite's `test_images` holds only JPG, TGA and PNG.
-     - Measure the warm import as the GUI does it: a fresh `ThumbnailCache` over a full disk cache.
-       Neither of bite's benchmarks does that (plan §6).
-     - Clear the thumbnail cache before each run.
+   - **macOS baselines - done** (10 November 2026), in [`baselines.md`](baselines.md):
+     - fire's TTFP per format (13 files, HEIC / AVIF / EXR / PSD included);
+     - 3D Review's binary sizes and startup gate;
+     - bite's cold and warm imports by format, with `magick` process counts, through the new
+       [`bench/bite-import`](../bench/bite-import/src/main.rs).
+
+     The corpus is bite's `test_images` plus derived AVIF / EXR files and two PSDs. The baseline
+     binaries and derived files are kept in the untracked `local/`.
+   - **On this Mac TTFP can't resolve 2%.** Identical binaries differ by up to ~5% at 12 launches.
+     So the macOS test is that no format gets slower, per the user. 3D Review's Windows baselines are
+     done (its `docs/PLAN.md`).
 
 3. **Step 1, the parts a Mac can do.** Start only **after fire's Asset Check additions have landed**
    (fire `docs/PLAN.md` A1), so they come over with the history.

@@ -1,0 +1,14 @@
+# Writes a half-float RGBA EXR (ZIP16) from a PNG, its colour linearised with a 2.2 curve: how the
+# step 0 corpus got texture-sized EXRs (docs/baselines.md). Homebrew's ImageMagick writes no EXR.
+#   cargo run --release --manifest-path bench/png-to-exr/Cargo.toml -- in.png out.exr
+[package]
+name = "png-to-exr"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+exr = "=1.74.0"
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
