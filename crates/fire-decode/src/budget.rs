@@ -194,7 +194,13 @@ pub(crate) fn par_chunks_mut(buf: &mut [u8], unit: usize, f: impl Fn(usize, &mut
     run_chunks_mut(buf, unit, want, f);
 }
 
-fn run_chunks_mut(buf: &mut [u8], unit: usize, want: usize, f: impl Fn(usize, &mut [u8]) + Sync) {
+/// [`par_chunks_mut`] on up to `want` threads, for a pass that judges its own worth.
+pub(crate) fn run_chunks_mut(
+    buf: &mut [u8],
+    unit: usize,
+    want: usize,
+    f: impl Fn(usize, &mut [u8]) + Sync,
+) {
     if want < 2 {
         f(0, buf);
         return;

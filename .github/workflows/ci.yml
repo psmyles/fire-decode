@@ -1,7 +1,7 @@
 # Correctness only (FD13). Performance is gated locally, before each tag (docs/baselines.md).
 #
 # FD13's four feature sets: viewer (psd heif icc raw mips), texture (psd heif mips), thumbnail
-# (psd heif) and core (none). `mips` arrives in step 7; until then texture is thumbnail's set.
+# (psd heif) and core (none).
 #
 # macOS arm64 only for now. The Windows x64 job (with crt-static, FD20) is added with the Windows
 # HEIF libraries (crates/heif-sys/vendor/VENDOR.txt).
@@ -27,11 +27,14 @@ jobs:
       - name: Clippy, core
         run: cargo clippy --workspace --all-targets --locked
 
-      - name: Clippy, thumbnail and texture (psd heif)
+      - name: Clippy, thumbnail (psd heif)
         run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif
 
-      - name: Clippy, viewer (psd heif icc raw)
-        run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif,fire-decode/icc,fire-decode/raw
+      - name: Clippy, texture (psd heif mips)
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif,fire-decode/mips
+
+      - name: Clippy, viewer (psd heif icc raw mips)
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif,fire-decode/icc,fire-decode/raw,fire-decode/mips
 
       - name: Test, core
         run: cargo test -p fire-decode --locked
@@ -39,11 +42,14 @@ jobs:
       - name: Test, psd
         run: cargo test -p fire-decode --locked --features psd
 
-      - name: Test, thumbnail and texture (psd heif)
+      - name: Test, thumbnail (psd heif)
         run: cargo test -p fire-decode --locked --features psd,heif
 
-      - name: Test, viewer (psd heif icc raw)
-        run: cargo test -p fire-decode --locked --features psd,heif,icc,raw
+      - name: Test, texture (psd heif mips)
+        run: cargo test -p fire-decode --locked --features psd,heif,mips
+
+      - name: Test, viewer (psd heif icc raw mips)
+        run: cargo test -p fire-decode --locked --features psd,heif,icc,raw,mips
 
       # The merged PSD bridge's own suites (FD3). real_psd skips here: its PSD is in 3D Review.
       - name: Test, psd-sdk-sys

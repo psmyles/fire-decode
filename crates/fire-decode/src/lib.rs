@@ -68,6 +68,8 @@ mod hdr;
 mod heif_meta;
 #[cfg(feature = "icc")]
 mod icc;
+#[cfg(feature = "mips")]
+pub mod mips;
 mod narrow;
 mod options;
 mod probe;

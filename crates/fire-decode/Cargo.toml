@@ -18,6 +18,8 @@ heif = ["dep:heif-sys"]
 icc = ["dep:lcms2"]
 # Camera raw, from its embedded JPEG preview.
 raw = []
+# The mip-chain builder fire and 3D Review upload textures with (FD11, `fire_decode::mips`).
+mips = []
 # Accept `panic = "abort"`, under which the crate's panic guard does nothing (FD7).
 allow-abort = []
 
