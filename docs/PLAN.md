@@ -31,8 +31,9 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
 
 ## Queue
 
-1. **Licence files (FD1).** Rename `LICENSE` to `LICENSE-MIT` and add `LICENSE-APACHE` (the crate is
-   `MIT OR Apache-2.0`). Quick; do it any time.
+1. **Licence files (FD1) - done** (10 November 2026). `LICENSE` is now `LICENSE-MIT`, and
+   `LICENSE-APACHE` is the standard Apache-2.0 text, the same file as fire's and 3D Review's
+   `licenses/Apache-2.0.txt`.
 
 2. **Step 0 on the Mac.**
    - **Build the HEIF test files:** 8 / 10 / 12-bit, an iPhone grid, portrait (`irot`), PQ, HLG, Apple
