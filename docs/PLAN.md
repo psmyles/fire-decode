@@ -185,12 +185,23 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
        (plan §6, PSD).
    - **Decision for later:** a fairer lease in the crate (FD8).
 
-9. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`; its
-   gate's Windows half joins "Needs Windows":
-   - **step 6** (fire only, any time after 3): the tonemap's negatives (6a), PQ / HLG to `Linear`
-     and to SDR (6b), gain maps (6c), sequences with HEIF progress and cancel in the loading bar
-     (6d);
-   - **step 7:** the `mips` feature.
+9. **Steps 6a and 6b - done on the Mac** (10 November 2026). The crate's part is in `main`
+   (`8449e9b`), fire's on its `fire-decode` branch (`1a88bbb`, `28a892d`); the plan's FD17 has
+   them as built and [`baselines.md`](baselines.md) the gates.
+   - **6a:** both tone curves, Reinhard and ACES, clamp negatives first, in the viewer's shader
+     and in fire-thumbs.
+   - **6b:** PQ / HLG HEIF and AVIF decode to light. `Hdr::Linear` is Rec.709 half float at
+     203 cd/m² = 1.0; `Sdr` clips at white and sRGB-encodes. `Probe` reports the HDR kind, and
+     fire opens PQ / HLG files as HDR.
+   - **The gates passed on the Mac:** the fixtures within 0.2% (2% for the lossy one), reference
+     white at white, `texture()` / `thumbnail()` unchanged on every other file, SDR HEIC TTFP
+     within noise.
+
+10. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`;
+    its gate's Windows half joins "Needs Windows":
+    - **step 6c:** gain maps, plus fire's HDR toggle; **6d:** sequences, with HEIF progress and
+      cancel in the loading bar;
+    - **step 7:** the `mips` feature.
 
 The gates are in `fire-decode-plan.md` §5. On a Mac only their macOS halves can pass, so record each
 gate as "macOS passed; Windows pending".
@@ -287,6 +298,12 @@ The Windows stretch, in order. Each item names what it unblocks.
       some soft-edged transparency, saved with Maximize Compatibility. Compare Photoshop's view
       with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
       matte that the crate should divide out (plan §6, PSD)?
+13. **Steps 6a and 6b's Windows half** (fire's `fire-decode` branch):
+    - **The regenerated HLSL compiles** (`fxc`, in fire's build) and the viewer draws an EXR and a
+      PQ file through both tone curves on Direct3D 11;
+    - **fire's TTFP** on the three iPhone HEICs and `grid_iphone.heic` against step 3's, within 2%;
+    - **fire-shellext** thumbnails `pq_lossless.avif` as SDR (203 cd/m² white, not the flat raw
+      signal).
 
 ## References
 

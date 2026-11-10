@@ -490,3 +490,40 @@ by default, and the eleventh chip starts a third row (`local/step5/input-folder-
   this Mac doesn't have;
 - `bite-gui.exe`'s and `bite.exe`'s import tables with `crt-static`, the Windows timings and the
   installer (Needs Windows).
+
+## Steps 6a and 6b on macOS: tone curves and PQ / HLG
+
+10 November 2026. This repository at `8449e9b`; fire's `fire-decode` branch at `28a892d` (6a is
+`1a88bbb`). Rust 1.99.1.
+
+**6a, the tone curves:** fire's 199 tests pass with the two new ones. Regenerating the shaders
+from the unchanged `shader.glsl` reproduces the committed files byte for byte, so the regenerated
+diff beyond the two clamps is SPIR-V renumbering.
+
+**6b, fixtures:** `tests/heif_fixtures.rs` against `fixtures/heif/expected.json`, every patch
+centre in both modes. The four lossless fixtures pass at 0.1% (the test allows 0.2%); the lossy
+`pq_ycbcr.avif` is off by up to 0.9% (allowed 2%). Reference white (PQ code 594, HLG 767) is at
+least 0.999 of white in `Sdr`. The crate's suite passes under all four CI feature sets (173 /
+196 / 215 / 226), with clippy clean.
+
+**6b, nothing else moved:** `texture()` and `thumbnail(256)` output, hashed (format, size, pixels,
+alpha flag, ICC length) by builds of `f99ff88` and `8449e9b`, over 137 files: the bite corpus,
+`local/corpus`, bite's `test_images`, every HEIF fixture and 3D Review's test textures. 132 are
+identical, errors included; the five that differ are the PQ / HLG fixtures.
+
+**6b, SDR HEIC TTFP**, `scripts/ttfp.sh -A local/bin/fire-step3 -B local/bin/fire-step6b -N 12`
+(`local/ttfp-macos-step6b.csv`):
+
+| File | Step 3 (ms) | Step 6b (ms) | Change |
+| --- | --- | --- | --- |
+| `IMG_2131.HEIC` | 212.5 | 220.0 | +3.5% (20 launches: -2.1%) |
+| `IMG_2135.HEIC` | 259.0 | 258.7 | -0.1% |
+| `IMG_2139.HEIC` | 212.5 | 208.2 | -2.0% |
+| `grid_iphone.heic` | 215.3 | 209.7 | -2.6% |
+
+Within the noise (identical binaries differ by up to ~5% here). An SDR HEIC's only new work is one
+check of its nclx kind.
+
+**6b in fire:** `pq_lossless.avif` and `hlg_lossless.heic` open in the step 6b build and reach
+their first frame as `Rgba16Float` (the TTFP harness), through the viewer's exposure and tone
+curve. bite and 3D Review still build against the crate unchanged.
