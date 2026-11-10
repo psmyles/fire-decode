@@ -153,10 +153,19 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
      - fire-cli reports a rotated JPEG's stored size;
      - no format slower in-process (HEIC 14.5% faster) or in fire's TTFP (48 MP HEIC 7% faster).
 
-7. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`; its
+7. **Step 4, 3D Review on `texture()` - done on the Mac** (10 November 2026), on 3D Review's
+   `fire-decode` branch, which merges with the first tag. Its `docs/PLAN.md` (B.3) has the change
+   and [`baselines.md`](baselines.md) the gate:
+   - startup +1.6% against a 10 ms budget;
+   - pixels identical but for what the plan names;
+   - HEIC / AVIF textures in Quick Look and the viewer's renderer;
+   - the over-limit upload intact.
+
+   For it, the crate gained `in_decode()`, so a panic hook can tell a decode's panic, its helper
+   threads' included, from any other (FD7).
+
+8. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`; its
    gate's Windows half joins "Needs Windows":
-   - **step 4:** 3D Review adopts `texture()` (its `docs/PLAN.md`, B.3). Its tag-dependent parts
-     wait for item 6 below;
    - **step 5:** bite adopts `thumbnail()` and `probe()`;
    - **step 6** (fire only, any time after 3): the tonemap's negatives (6a), PQ / HLG to `Linear`
      and to SDR (6b), gain maps (6c), sequences with HEIF progress and cancel in the loading bar
@@ -241,6 +250,9 @@ The Windows stretch, in order. Each item names what it unblocks.
     - **`tests/probe.rs` with `FIRE_DECODE_CORPUS`** pointing at fire's validation set;
     - **fire-cli's tests**, the rotated JPEG included, and Asset Check over CrimeCrew's textures
       with the same results as before, apart from rotated JPEGs now reporting their stored size.
+11. **Step 4's Windows half**: 3D Review's `docs/PLAN.md`, "Needs Windows". Its startup gate and
+    import tables, HEIC / AVIF in the viewer and Explorer, and Asset Check reading a
+    `review3d-cli` panic's exit code 101 as the tool failing.
 
 ## References
 

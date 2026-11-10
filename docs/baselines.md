@@ -340,3 +340,57 @@ between -5.0% and +2.0% and the TGA between -1.9% and +1.6%, with an A/A run of 
 itself 5.4% apart on that TGA in the same session (`-aa.txt`). No format is slower beyond the
 harness's noise, and the 48 MP HEIC is 7% faster. So step 3's macOS gate passes; its Windows half
 is in `docs/PLAN.md`, "Needs Windows".
+
+## Step 4 on macOS: 3D Review on fire-decode
+
+10 November 2026. 3D Review's `fire-decode` branch (`5abe8c3`) against this repository at
+`13454b7`, through the same untracked `[patch]` as fire. Rust 1.99.1. The details of the change are
+in 3D Review's `docs/PLAN.md`, B.3.
+
+**Tests:** all of 3D Review's pass but `a_classic_material_imports_as_a_dielectric`, which fails on
+its `main` too: no local fixture declares a ReflectionFactor. Clippy is clean.
+
+**Sizes and imports** against step 0 (`local/bin/3d-review-746f64b`):
+
+| Binary | Step 0 (bytes) | Step 4 (bytes) | Imports | `minos` |
+| --- | --- | --- | --- | --- |
+| `3d-review` | 19,661,536 | 27,247,728 (+7.6 MB) | unchanged | 11.0 |
+| `libreview_quicklook.dylib` (`release-shell`) | 7,647,360 | 13,195,376 (+5.5 MB) | unchanged | 11.0 |
+
+The growth is the HEIF stack, JPEG XL, OpenEXR and the other formats 3D Review didn't read.
+
+**The startup gate**, `scripts/gate.sh -n 15` against `746f64b` on `SM_Wall_Break_4x3m.fbx`
+(`local/gate-3d-review-macos-step4-n15.txt`):
+
+| Measure | Step 0 | Step 4 | Change | Budget |
+| --- | --- | --- | --- | --- |
+| startup (ms) | 279.2 | 283.7 | +4.5 (+1.6%) | +10.0 |
+| frame (ms) | 3.413 | 3.394 | -0.5% | +0.3 |
+| footprint (MB) | 496.0 | 497.0 | +0.2% | +5% |
+| audit (ms) | 165.5 | 108.1 | -34.7% | - |
+
+Passed. The default 5 runs read startup +20.9 ms (`-step4.txt`); a build with `panic = "abort"`
+read 10 ms *slower* than the unwinding one in the same session, so neither unwinding nor the
+crate's six static initializers is the cost, and 15 runs a side settled it. The fixture has no
+textures, so no decode is on the measured path.
+
+**Pixel comparison**, every texture through 3D Review's old decoder (`main`) and the new one, over
+bite's `test_images`, `local/corpus`, 3D Review's and CrimeCrew's assets, its six IBL `.hdr`
+sources and hand-made 16 / 32-bit PSDs: 111 files (`local/step4/pixel-compare.txt`).
+- **97 byte-identical:** JPEG, PNG (8 and 16-bit), TGA, 8-bit PSD, and 16-bit PSDs whose samples
+  are multiples of 257.
+- **8 decode where they failed:** 3 HEIC, 3 AVIF, 2 OpenEXR.
+- **A 32-bit PSD's colour reading is byte-identical** to the old bridge's; its data reading is new.
+- **Radiance HDR:** the data reading equals the old output (clamped, no curve); the colour reading
+  is now sRGB-encoded (up to 73 codes brighter), so a `.hdr` in a Base Color slot is shown right.
+- **A 16-bit PSD with arbitrary samples:** 1,522 of 8,192 bytes 1 code apart, rounded where the
+  old bridge truncated.
+
+**HEIC and AVIF textures:** FBX planes made in Blender with an iPhone HEIC, and an AVIF, embedded as
+their base colour draw the photo through the Quick Look dylib (`scripts/quicklook-check.sh`:
+thumbnail and preview) and through `review-snapshot`, the viewer's renderer
+(`local/step4/*.png`).
+
+**Over the GPU limit:** an FBX embedding a 20000×400 texture draws its gradient in
+`review-snapshot`: `texture()` doesn't shrink it, and the upload starts from the first mip within
+Metal's 16384.
