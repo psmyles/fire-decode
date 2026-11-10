@@ -1,0 +1,50 @@
+# Correctness only (FD13). Performance is gated locally, before each tag (docs/baselines.md).
+#
+# FD13's four feature sets (viewer, texture, thumbnail, core) need the features migration step 3
+# adds (icc, raw, mips). Until then the sets are what exists: core (none), psd, and psd + heif.
+#
+# macOS arm64 only for now. The Windows x64 job (with crt-static, FD20) is added with the Windows
+# HEIF libraries (crates/heif-sys/vendor/VENDOR.txt).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the toolchain; this installs it with its components and targets.
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy, core
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Clippy, psd + heif
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif
+
+      - name: Test, core
+        run: cargo test -p fire-decode --locked
+
+      - name: Test, psd
+        run: cargo test -p fire-decode --locked --features psd
+
+      - name: Test, psd + heif
+        run: cargo test -p fire-decode --locked --features psd,heif
+
+      # FD13: heif on Windows without the static CRT must stop at heif-sys's named error, not deep
+      # in a mixed-CRT link. Checked from here by cross-checking for the MSVC target.
+      - name: heif without crt-static on Windows is a named error
+        shell: bash
+        run: |
+          if cargo check -p heif-sys --locked --target x86_64-pc-windows-msvc 2> check.log; then
+            echo "heif-sys built for Windows without crt-static"; exit 1
+          fi
+          grep -q "heif-sys needs the static CRT on Windows" check.log
