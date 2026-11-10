@@ -85,7 +85,7 @@ fn lanes16(img: &DecodedImage, i: usize) -> [u16; 4] {
 }
 
 fn opts() -> DecodeOptions {
-    DecodeOptions::default()
+    DecodeOptions::viewer()
 }
 
 // --- block-compressed formats ----------------------------------------------------------------
@@ -100,9 +100,9 @@ fn bc1_solid_block_decodes_to_its_endpoint_colour() {
 
     assert_eq!((img.width, img.height), (4, 4));
     assert_eq!(img.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(img.source_format, "DDS BC1");
-    assert_eq!(img.bit_depth, 8);
-    assert_eq!(img.channels, 4);
+    assert_eq!(img.source.name, "DDS BC1");
+    assert_eq!(img.source.bit_depth, 8);
+    assert_eq!(img.source.channels, 4);
     assert_eq!(img.pixels.len(), 4 * 4 * 4);
     for i in 0..16 {
         assert_eq!(rgba8(&img, i), [255, 0, 0, 255], "texel {i}");
@@ -118,8 +118,8 @@ fn bc4_replicates_its_one_channel_to_grey() {
     let file = dxgi(DxgiFormat::BC4_UNorm, 4, 4, &bc4_solid(200));
     let img = decode(&file, Some("dds"), &opts()).expect("BC4 decodes");
 
-    assert_eq!(img.source_format, "DDS BC4");
-    assert_eq!(img.channels, 1);
+    assert_eq!(img.source.name, "DDS BC4");
+    assert_eq!(img.source.channels, 1);
     for i in 0..16 {
         assert_eq!(rgba8(&img, i), [200, 200, 200, 255], "texel {i}");
     }
@@ -135,9 +135,9 @@ fn bc5_lands_in_the_red_and_green_lanes() {
     let file = dxgi(DxgiFormat::BC5_UNorm, 4, 4, &data);
     let img = decode(&file, Some("dds"), &opts()).expect("BC5 decodes");
 
-    assert_eq!(img.source_format, "DDS BC5");
+    assert_eq!(img.source.name, "DDS BC5");
     // Three, not two: a two-lane source shown as RGB is not "Gray+A".
-    assert_eq!(img.channels, 3);
+    assert_eq!(img.source.channels, 3);
     for i in 0..16 {
         assert_eq!(rgba8(&img, i), [200, 100, 0, 255], "texel {i}");
     }
@@ -168,9 +168,9 @@ fn bc6h_decodes_to_half_float_hdr() {
 
     assert_eq!(img.format, PixelFormat::Rgba16Float);
     assert!(img.format.is_hdr(), "BC6H drives the exposure/tonemap path");
-    assert_eq!(img.source_format, "DDS BC6H");
-    assert_eq!(img.bit_depth, 16);
-    assert_eq!(img.channels, 3);
+    assert_eq!(img.source.name, "DDS BC6H");
+    assert_eq!(img.source.bit_depth, 16);
+    assert_eq!(img.source.channels, 3);
     assert_eq!(img.pixels.len(), 4 * 4 * 8);
     for i in 0..16 {
         // 0x3c00 is half-precision 1.0.
@@ -185,7 +185,7 @@ fn bc7_routes_to_its_own_decoder() {
     let file = dxgi(DxgiFormat::BC7_UNorm, 4, 4, &[0u8; 16]);
     let img = decode(&file, Some("dds"), &opts()).expect("BC7 decodes");
 
-    assert_eq!(img.source_format, "DDS BC7");
+    assert_eq!(img.source.name, "DDS BC7");
     assert_eq!(img.format, PixelFormat::Rgba8Unorm);
     assert_eq!(img.pixels.len(), 4 * 4 * 4);
 }
@@ -221,9 +221,9 @@ fn bgra8_is_swizzled_to_rgba() {
     let file = dxgi(DxgiFormat::B8G8R8A8_UNorm, 2, 1, &data);
     let img = decode(&file, Some("dds"), &opts()).expect("BGRA8 decodes");
 
-    assert_eq!(img.source_format, "DDS BGRA8");
+    assert_eq!(img.source.name, "DDS BGRA8");
     assert_eq!(img.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(img.channels, 4);
+    assert_eq!(img.source.channels, 4);
     assert_eq!(rgba8(&img, 0), [30, 20, 10, 40]);
     assert_eq!(rgba8(&img, 1), [70, 60, 50, 80]);
 }
@@ -243,7 +243,7 @@ fn rgba16f_stays_half_float() {
 
     assert_eq!(img.format, PixelFormat::Rgba16Float);
     assert!(img.format.is_hdr());
-    assert_eq!(img.source_format, "DDS RGBA16F");
+    assert_eq!(img.source.name, "DDS RGBA16F");
     assert_eq!(lanes16(&img, 0), halves);
 }
 
@@ -259,7 +259,7 @@ fn rgba16_unorm_keeps_its_depth() {
     let img = decode(&file, Some("dds"), &opts()).expect("RGBA16 decodes");
 
     assert_eq!(img.format, PixelFormat::Rgba16Unorm);
-    assert_eq!(img.bit_depth, 16);
+    assert_eq!(img.source.bit_depth, 16);
     assert_eq!(lanes16(&img, 0), lanes);
 }
 
@@ -273,7 +273,7 @@ fn legacy_a8r8g8b8_decodes_through_the_bit_masks() {
     let img = decode(&file, Some("dds"), &opts()).expect("A8R8G8B8 decodes");
 
     assert_eq!(img.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(img.channels, 4);
+    assert_eq!(img.source.channels, 4);
     assert_eq!(rgba8(&img, 0), [10, 20, 30, 200]);
 }
 
@@ -288,7 +288,7 @@ fn ten_bit_channels_widen_to_sixteen() {
     let img = decode(&file, Some("dds"), &opts()).expect("RGB10A2 decodes");
 
     assert_eq!(img.format, PixelFormat::Rgba16Unorm);
-    assert_eq!(img.bit_depth, 10);
+    assert_eq!(img.source.bit_depth, 10);
     let [r, g, b, a] = lanes16(&img, 0);
     assert_eq!((r, g, a), (0xffff, 0, 0xffff));
     // 511/1023 of 65535 is 32735.03, and the rounding lands it on 32735.
@@ -302,7 +302,7 @@ fn single_channel_float_replicates_to_grey() {
     let img = decode(&file, Some("dds"), &opts()).expect("R32F decodes");
 
     assert_eq!(img.format, PixelFormat::Rgba32Float);
-    assert_eq!(img.channels, 1);
+    assert_eq!(img.source.channels, 1);
     let px: &[f32] = bytemuck::cast_slice(&img.pixels);
     assert_eq!(px[..4], [0.25, 0.25, 0.25, 1.0]);
 }
@@ -387,8 +387,11 @@ fn a_downscale_drops_the_file_chain() {
     assert!(big.source_mips.is_some(), "kept at full size");
 
     let shrunk = DecodeOptions {
-        max_dim: 4,
-        ..DecodeOptions::default()
+        fit: Some(fire_decode::Fit {
+            max: 4,
+            filter: fire_decode::Filter::Nearest,
+        }),
+        ..DecodeOptions::viewer()
     };
     let small = decode(&file, Some("dds"), &shrunk).expect("decodes");
     assert_eq!((small.width, small.height), (4, 4));
@@ -568,7 +571,7 @@ fn dds_routes_by_magic_not_by_extension() {
     let file = dxgi(DxgiFormat::BC1_UNorm, 4, 4, &bc1_solid(0xf800));
     for hint in [None, Some("png"), Some("DDS"), Some("")] {
         let img = decode(&file, hint, &opts()).expect("routes by magic");
-        assert_eq!(img.source_format, "DDS BC1", "with hint {hint:?}");
+        assert_eq!(img.source.name, "DDS BC1", "with hint {hint:?}");
     }
 }
 

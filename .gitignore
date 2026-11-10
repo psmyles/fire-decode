@@ -29,3 +29,4 @@ local/
 # bench/bite-import builds against a sibling bite checkout
 bench/bite-import/Cargo.lock
 bench/png-to-exr/Cargo.lock
+bench/decode-formats/Cargo.lock

@@ -1,4 +1,4 @@
-//! Uniform decode core: `bytes -> (pixels, format, bit depth, optional ICC)`.
+//! Uniform decode core: `bytes -> (pixels, buffer format, what the file is, optional ICC)`.
 //!
 //! All format backends live behind the single [`decode`] entry point so callers
 //! never see per-format detail. Routing is by magic bytes (and, for camera raw, the file
@@ -7,7 +7,7 @@
 //!     its layers one at a time through [`PsdLayers`] (pure Rust)
 //!   - EXR            -> `exr` crate       : half or 32-bit float RGBA, as stored (linear/HDR)
 //!   - DDS            -> `ddsfile` + `bcdec_rs`: BC1-BC7 and the uncompressed layouts
-//!   - HEIC/HEIF/AVIF -> libheif (C FFI)   : 8-bit RGBA, or 16-bit RGBA for HDR (+ICC)
+//!   - HEIC/HEIF/AVIF -> libheif (C++ FFI) : 8-bit RGBA, or 16-bit RGBA for 10/12-bit (+ICC)
 //!   - camera raw     -> [`raw`] preview   : extract the embedded JPEG, decode via zune
 //!   - GIF            -> `image` crate     : every frame (animated GIF plays; see [`Animation`])
 //!   - Radiance HDR   -> `image` crate     : 32-bit float RGBA (linear/HDR); see [`decode_hdr`]
@@ -24,62 +24,77 @@
 //! measured faster than zune's (and, for HDR, correct where zune-hdr is not); see
 //! [`decode_hdr`] / [`decode_png`].
 //!
-//! ICC profiles are extracted here; the lcms2 transform into the working space is
-//! applied by [`icc`]. Images larger than the caller's `max_dim` are CPU-downscaled to
-//! fit ([`downscale`]).
+//! Each app asks for a decode through a named setup ([`DecodeOptions::viewer`], `inspect`,
+//! `texture`, `thumbnail`; FD5). After the backend, [`decode`] runs the same passes for every
+//! format, in this order:
+//! 1. **EXIF orientation**, when the setup honours it ([`exif`]): it can swap width and height, so
+//!    it goes first, and every dimension reported describes the same upright image;
+//! 2. **colour**: an embedded ICC profile, or a wide-gamut nclx description, converted to sRGB
+//!    (`icc` feature, [`icc`]);
+//! 3. **fit** within the setup's size ([`downscale`]);
+//! 4. **narrowing** to the setup's [`Output`] ([`narrow`]), after the fit so a thumbnail narrows
+//!    256 px rather than 8K;
+//! 5. the opaque-alpha scan, on exactly what is returned.
 //!
-//! No backend honors the EXIF `Orientation` tag, so [`decode`] does it once for all of them
-//! ([`exif`]): the tag is read out of the source bytes and the decoded buffer is rotated before
-//! the ICC pass, so every consumer sees upright dimensions and the renderer stays a single
-//! constant-buffer draw.
+//! Panics anywhere in a decode come back as [`DecodeError::Panicked`] (FD7), and every parallel
+//! pass draws on one process-wide thread budget (FD8, [`budget`]).
 //!
-//! The two FFI backends sit behind the **default-on** `psd` and `heif` features — the only
-//! parts of the workspace that need the vendored native trees. Building without them keeps the
-//! routing identical and returns a "built without" error for those formats, which is what lets
-//! CI lint and test everything here on a runner that has no vendored input at all.
+//! **Cargo features** (FD13), none on by default: `psd` and `heif` need the native code in
+//! `psd-sdk-sys` / `heif-sys`; `icc` brings in lcms2; `raw` decodes camera raw. A format compiled
+//! out still routes as before and returns [`DecodeError::Unsupported`], which is what lets CI lint
+//! and test the pure-Rust core on its own. `allow-abort` is below.
+
+// The panic guard is `catch_unwind`, which does nothing when panics abort (FD7): a decode panic
+// would take the process down. So such a build is refused unless it says it knows.
+#[cfg(all(panic = "abort", not(feature = "allow-abort")))]
+compile_error!(
+    "fire-decode catches decode panics with catch_unwind, which panic = \"abort\" makes inert. \
+     Build with panic = \"unwind\", or enable the \"allow-abort\" feature to accept that a decode \
+     panic aborts the process."
+);
 
 use std::io::Cursor;
 use std::path::Path;
 
+mod budget;
 mod dds;
 mod downscale;
 mod exif;
+mod format;
+#[cfg(feature = "icc")]
+mod icc;
+mod narrow;
+mod options;
+mod probe;
 mod psd_layers;
 mod raw;
+mod source;
 mod tiff;
 
+pub(crate) use budget::{par_chunks, par_chunks_mut};
+pub use format::{Format, all_extensions, is_supported_extension, supported_extensions};
+pub use options::{DecodeCtl, DecodeOptions, Filter, Fit, Frames, Hdr, Limits, Output, Surfaces};
+pub use probe::{Probe, probe};
 pub use psd_layers::{BlendMode, LayerCtl, LayerError, LayerImage, LayerInfo, PsdLayers, Rect};
+pub use source::{HdrKind, Primaries, Sample, SourceInfo, Transfer};
 
-/// Upper bound on a decoded source dimension. zune's default cap is 16384, which would
-/// reject any image larger than that on an axis before we ever get a chance to downscale
-/// it to the caller's `max_dim` — so we raise the cap well past any realistic image while
-/// still rejecting absurd (corrupt/decode-bomb) headers in the billions.
-const MAX_DECODE_DIM: usize = 1 << 17; // 131072
+use options::Progress;
 
 /// Upper bound on the *total* pixel buffer an animated source may hold, across all frames.
 /// Every GIF frame is a full RGBA canvas ([`AnimationFrame`]), so memory is
 /// `frames × width × height × 4` — bounding the dimensions alone leaves the frame count free to
 /// multiply them. 1 GiB is far past any real animation (a 640×480 GIF gets ~870 frames) while
-/// keeping a crafted one from exhausting RAM.
-const MAX_ANIMATION_BYTES: usize = 1 << 30; // 1 GiB
+/// keeping a crafted one from exhausting RAM. A setup's own `max_bytes` lowers it further.
+const MAX_ANIMATION_BYTES: u64 = 1 << 30; // 1 GiB
 
 /// Hard ceiling on animation frames, independent of [`MAX_ANIMATION_BYTES`]: a tiny canvas
 /// makes the byte budget effectively unbounded, and every frame still costs a `Vec` and a
 /// timer tick.
 const MAX_ANIMATION_FRAMES: usize = 10_000;
 
-/// Upper bound on the pixel buffer a single decoded image may allocate, in bytes. Checked against
-/// `width × height × bytes_per_pixel`, because **the product is what gets allocated** — a per-axis
-/// cap alone bounds nothing useful: GIF's dimensions are `u16`, so a 65535×65535 GIF sits far under
-/// [`MAX_DECODE_DIM`] on both axes and still asks for 17 GiB.
-///
-/// 4 GiB clears the largest images this viewer is meant to open (the 216-MP scan cited in
-/// [`decode_png`] is ~1.7 GiB at 16-bit) while refusing the decode bombs.
-const MAX_DECODE_BYTES: usize = 4 << 30; // 4 GiB
-
-/// Reject a header whose declared size would allocate more than we are willing to — **before**
-/// anything is allocated from it. `bytes_per_pixel` is that of the buffer the caller is about to
-/// allocate (i.e. the *normalized RGBA* output: 4, 8, or 16), not the source's own layout.
+/// Reject a header whose declared size would allocate more than the setup's [`Limits`] allow —
+/// **before** anything is allocated from it. `bytes_per_pixel` is that of the buffer the caller is
+/// about to allocate (i.e. the *normalized RGBA* output: 4, 8, or 16), not the source's own layout.
 ///
 /// This guard is not redundant with the `catch_unwind` that wraps every decode, and cannot be
 /// replaced by it: `catch_unwind` catches *panics*, and a `Vec` allocation that fails does not
@@ -87,31 +102,71 @@ const MAX_DECODE_BYTES: usize = 4 << 30; // 4 GiB
 /// claiming billions of pixels has to be turned away here; nothing downstream can catch it.
 ///
 /// Applied by every backend that sizes a buffer from parsed dimensions *and* can see those
-/// dimensions before allocating: PNG, GIF, Radiance HDR, OpenEXR, TIFF. PSD applies it after
-/// the fact — its allocation happens behind the FFI, guarded by the C++ side's own cap — so
-/// the shared policy holds there even if that guard drifts. The zune hot path cannot —
-/// `zune_image::Image::read` decodes in one shot and only reports dimensions afterwards — so it
-/// relies on zune's own per-axis caps ([`MAX_DECODE_DIM`]) and remains bounded only by the product
-/// of those; see `decode_zune`.
+/// dimensions before allocating. PSD and HEIF apply the same limits on the far side of their
+/// bridges, before the native code allocates, and again here after the fact, so the shared policy
+/// holds even if those guards drift.
 fn check_dims(
     width: usize,
     height: usize,
     bytes_per_pixel: usize,
     what: &str,
+    limits: &Limits,
 ) -> Result<(), DecodeError> {
-    if width > MAX_DECODE_DIM || height > MAX_DECODE_DIM {
+    let max_dim = limits.max_dim as usize;
+    if width > max_dim || height > max_dim {
         return Err(DecodeError::TooLarge(format!(
-            "{what} dimensions {width}x{height} exceed the {MAX_DECODE_DIM} per-axis decode guard"
+            "{what} dimensions {width}x{height} exceed the {max_dim} per-axis decode guard"
         )));
     }
     let bytes = width
         .checked_mul(height)
         .and_then(|px| px.checked_mul(bytes_per_pixel));
     match bytes {
-        Some(b) if b <= MAX_DECODE_BYTES => Ok(()),
+        Some(b) if b as u64 <= limits.max_bytes => Ok(()),
         _ => Err(DecodeError::TooLarge(format!(
-            "{what} {width}x{height} needs more than the {MAX_DECODE_BYTES}-byte decode guard"
+            "{what} {width}x{height} needs more than the {}-byte decode guard",
+            limits.max_bytes
         ))),
+    }
+}
+
+/// What a backend needs from the decode it runs in.
+pub(crate) struct Cx<'a> {
+    pub(crate) opts: &'a DecodeOptions,
+    progress: &'a Progress<'a>,
+    cancel: &'a (dyn Fn() -> bool + Sync),
+}
+
+impl Cx<'_> {
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.opts.limits
+    }
+
+    /// [`check_dims`] against this decode's limits.
+    pub(crate) fn check_dims(
+        &self,
+        width: usize,
+        height: usize,
+        bytes_per_pixel: usize,
+        what: &str,
+    ) -> Result<(), DecodeError> {
+        check_dims(width, height, bytes_per_pixel, what, &self.opts.limits)
+    }
+
+    pub(crate) fn progress(&self, p: f32) {
+        self.progress.report(p);
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
+        (self.cancel)()
+    }
+
+    fn check_cancel(&self) -> Result<(), DecodeError> {
+        if self.cancelled() {
+            Err(DecodeError::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -120,112 +175,6 @@ fn check_dims(
 /// that can be gigabytes — and there were seven of them.
 pub(crate) fn to_ne_bytes<T: bytemuck::Pod>(v: &[T]) -> Vec<u8> {
     bytemuck::cast_slice(v).to_vec()
-}
-
-thread_local! {
-    /// This thread's cap on the threads [`par_chunks`]/[`par_chunks_mut`] may use; 0 = no cap.
-    static THREAD_CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Run `f` with the parallel passes it reaches (ICC transform, alpha scan) limited to `n` threads
-/// (0 = no limit). Background work — pre-decoding PSD layers the user has not asked for yet — runs
-/// on one thread so it never competes with the image the user is waiting for.
-pub fn with_max_threads<R>(n: usize, f: impl FnOnce() -> R) -> R {
-    /// Puts the previous cap back even if `f` unwinds, so a pooled worker that catches the panic
-    /// does not keep this cap for every later decode it runs.
-    struct Restore(usize);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            THREAD_CAP.set(self.0);
-        }
-    }
-    let _restore = Restore(THREAD_CAP.replace(n));
-    f()
-}
-
-/// Threads a parallel pass may use on this thread: the core count (at most 8), under any
-/// [`with_max_threads`] cap.
-fn thread_budget() -> usize {
-    let avail = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
-    match THREAD_CAP.get() {
-        0 => avail,
-        cap => cap.min(avail),
-    }
-}
-
-/// Run `f` over `buf` split into contiguous parts, each a whole number of `unit`-byte items, on
-/// up to 8 scoped threads; `f` also gets the part's byte offset into `buf`. A buffer under 1 MiB
-/// runs on the calling thread: below that the hand-off costs more than the work.
-pub(crate) fn par_chunks_mut(buf: &mut [u8], unit: usize, f: impl Fn(usize, &mut [u8]) + Sync) {
-    const PARALLEL_MIN_BYTES: usize = 1 << 20;
-    let threads = if buf.len() >= PARALLEL_MIN_BYTES {
-        thread_budget()
-    } else {
-        1
-    };
-    if threads <= 1 {
-        f(0, buf);
-        return;
-    }
-    let per = buf.len().div_ceil(threads).div_ceil(unit) * unit;
-    std::thread::scope(|scope| {
-        for (i, part) in buf.chunks_mut(per).enumerate() {
-            let f = &f;
-            scope.spawn(move || f(i * per, part));
-        }
-    });
-}
-
-/// [`par_chunks_mut`] for a buffer that is only read.
-pub(crate) fn par_chunks(buf: &[u8], unit: usize, f: impl Fn(usize, &[u8]) + Sync) {
-    const PARALLEL_MIN_BYTES: usize = 1 << 20;
-    let threads = if buf.len() >= PARALLEL_MIN_BYTES {
-        thread_budget()
-    } else {
-        1
-    };
-    if threads <= 1 {
-        f(0, buf);
-        return;
-    }
-    let per = buf.len().div_ceil(threads).div_ceil(unit) * unit;
-    std::thread::scope(|scope| {
-        for (i, part) in buf.chunks(per).enumerate() {
-            let f = &f;
-            scope.spawn(move || f(i * per, part));
-        }
-    });
-}
-
-/// Every file extension fire can open, lower-case.
-///
-/// **The** list — the viewer's Open-dialog filter (`win.rs`) and its folder-navigation membership
-/// test (`folder.rs`) both read it from here rather than keeping their own. They used to keep their
-/// own, and the two had already drifted apart: a `.qoi` was reachable with the arrow keys but
-/// invisible in the Open dialog. The installer's per-format associations (`installer/fire.iss`) are
-/// a fourth consumer that *cannot* import this — it is an Inno Setup script — so a test below reads
-/// the `.iss` and asserts it registers exactly this set. `fire-thumbs`' format table, which groups
-/// these into the Explorer-thumbnail checkboxes, is held to it by a test of its own.
-///
-/// Note this is a convenience for *naming* files, not the routing decision: [`decode`] sniffs magic
-/// bytes and will happily open a supported image with the wrong extension (or none).
-pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    // Still formats, in the order the module doc lists the backends.
-    "png", "jpg", "jpeg", "jpe", "jfif", "gif", "bmp", "dib", "tif", "tiff", "tx", "webp", "ico",
-    "cur", "tga", "qoi", "ppm", "pgm", "pbm", "pnm", "pam", "ff", "jxl", "hdr", "pic", "rgbe",
-    "xyze", "exr", "dds", "psd", "psb", "heic", "heif", "avif", //
-    // Camera raw (embedded-preview decode). Mirrors `raw::EXT_LABELS`, which is what actually
-    // routes them — `raw_extensions_are_all_listed` keeps the two honest.
-    "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef", "srw",
-    "dng", "x3f", "3fr", "fff", "iiq", "erf", "mrw", "dcr", "kdc", "mef", "mos", "rwl", "gpr",
-    "raw",
-];
-
-/// Whether `ext` (with no leading dot, any case) is one fire can open. See
-/// [`SUPPORTED_EXTENSIONS`].
-pub fn is_supported_extension(ext: &str) -> bool {
-    let lower = ext.to_ascii_lowercase();
-    SUPPORTED_EXTENSIONS.contains(&lower.as_str())
 }
 
 /// Pixel layout of a decoded image. Drives the per-format CPU sampling path and whether the
@@ -254,6 +203,15 @@ impl PixelFormat {
             PixelFormat::Rgba8Unorm => 4,
             PixelFormat::Rgba16Unorm | PixelFormat::Rgba16Float => 8,
             PixelFormat::Rgba32Float => 16,
+        }
+    }
+
+    /// Bits per channel.
+    fn bits(self) -> u8 {
+        match self {
+            PixelFormat::Rgba8Unorm => 8,
+            PixelFormat::Rgba16Unorm | PixelFormat::Rgba16Float => 16,
+            PixelFormat::Rgba32Float => 32,
         }
     }
 }
@@ -316,39 +274,27 @@ pub struct DecodedImage {
     pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// The buffer's layout. The file's own depth, channels and colour are in [`source`](Self::source).
     pub format: PixelFormat,
-    /// Bits per channel of the *source* (for the status bar), independent of `format`. A PNG
-    /// reports its IHDR depth, so a 1-, 2- or 4-bit file says so even though it decodes to 8 bits;
-    /// for a palette image that is the width of an index (see [`palette`](Self::palette)).
-    pub bit_depth: u8,
-    /// The source's true channel count (1=gray, 2=gray+A, 3=RGB, 4=RGBA), for the status bar and
-    /// the RGB↔RGBA toolbar icon. Reported faithfully even when an alpha channel is fully opaque —
-    /// a 32-bit PNG screenshot still reads "RGBA" and keeps an inspectable alpha channel; whether
-    /// that alpha actually carries transparency is a separate signal ([`alpha_opaque`](Self::alpha_opaque)).
-    pub channels: u8,
-    /// Whether the source stores palette indices rather than colours. `bit_depth` is then the
-    /// index width (1, 2, 4 or 8) and `channels` what the palette expands to: 3, or 4 when the
-    /// palette carries transparency. Only PNG reports it today; the other formats that can hold a
-    /// palette (GIF, BMP, TGA, TIFF, PSD's Indexed mode) say `false`.
-    pub palette: bool,
-    /// Whether a declared alpha channel (`channels` 2 or 4) is entirely opaque — every sample
-    /// fully opaque, so there is no transparency to composite. Set by [`decode`] from a scan of the
-    /// final (post-ICC, post-downscale) buffer; the viewer uses it to skip the default checker
-    /// backdrop for, e.g., a screenshot whose alpha is uniformly `0xff`, while still reporting the
-    /// true format and letting the user isolate the (all-white) alpha channel. `false` whenever
-    /// there is no alpha channel.
+    /// What the file is, whatever the buffer was narrowed, rotated or shrunk to (FD4).
+    pub source: SourceInfo,
+    /// Whether a declared alpha channel (`source.channels` 2 or 4) is entirely opaque — every
+    /// sample fully opaque, so there is no transparency to composite. Set by [`decode`] from a scan
+    /// of the final buffer; the viewer uses it to skip the default checker backdrop for, e.g., a
+    /// screenshot whose alpha is uniformly `0xff`, while still reporting the true format and
+    /// letting the user isolate the (all-white) alpha channel. `false` whenever there is no alpha
+    /// channel.
     pub alpha_opaque: bool,
-    /// Embedded ICC profile bytes, if the backend surfaced one.
+    /// Embedded ICC profile bytes, if the backend surfaced one, whether or not it was applied.
     pub icc: Option<Vec<u8>>,
-    /// Human-readable source format name for the status bar (e.g. "PNG", "OpenEXR").
-    pub source_format: &'static str,
-    /// If the image was downscaled to fit `DecodeOptions::max_dim`, the original
-    /// (width, height) before downscaling; the pixel inspector notes this (§6).
+    /// If the image was shrunk to fit [`DecodeOptions::fit`], the original (width, height); the
+    /// pixel inspector notes this.
     pub downscaled_from: Option<(u32, u32)>,
-    /// The file's own mip chain, levels `1..`, when it brought one. Each buffer is one level in
-    /// `format`'s layout at `((width >> i).max(1), (height >> i).max(1))`, smallest last — the
-    /// same shape and the same halving rule the viewer's own mip builder uses, so a chain that
-    /// survives to the worker can be adopted verbatim instead of rebuilt.
+    /// The file's own mip chain, levels `1..`, when it brought one and the setup keeps it
+    /// ([`DecodeOptions::stored_mips`]). Each buffer is one level in `format`'s layout at
+    /// `((width >> i).max(1), (height >> i).max(1))`, smallest last — the same shape and the same
+    /// halving rule the viewer's own mip builder uses, so a chain that survives to the worker can
+    /// be adopted verbatim instead of rebuilt.
     ///
     /// Only DDS supplies one today, and it is the format where it matters: the levels in a `.dds`
     /// are *authored*, often with a filter and a gamma the box filter does not reproduce, and an
@@ -359,16 +305,17 @@ pub struct DecodedImage {
     /// because a chain that no longer describes the canvas is worse than no chain at all.
     pub source_mips: Option<Vec<Vec<u8>>>,
     /// When the canvas is several surfaces tiled into a grid — a cubemap's faces, an array's
-    /// layers, a volume's slices — how to read it back. Only DDS sets it. `None` for the ordinary
-    /// single-surface case, which is every other format.
+    /// layers, a volume's slices — how to read it back. Only DDS sets it, and only with
+    /// [`Surfaces::Sheet`]. `None` for the ordinary single-surface case, which is every other
+    /// format.
     ///
     /// Unlike a detected sprite-sheet grid this is *authored*: the file says how many surfaces it
     /// holds and how big each one is, so the viewer adopts it rather than offering it as a guess.
     pub layout: Option<SheetLayout>,
-    /// Playback timing/pixels for an animated source (animated GIF). `None` for a still image —
-    /// the common case, so the still path is untouched. When `Some`, `pixels` above is frame 0
-    /// (shown immediately) and [`Animation::frames`] holds the full sequence for the viewer to
-    /// cycle through. See [`Animation`].
+    /// Playback timing/pixels for an animated source (animated GIF), with [`Frames::All`]. `None`
+    /// for a still image — the common case, so the still path is untouched. When `Some`, `pixels`
+    /// above is frame 0 (shown immediately) and [`Animation::frames`] holds the full sequence for
+    /// the viewer to cycle through.
     pub animation: Option<Animation>,
 }
 
@@ -390,19 +337,19 @@ pub struct Animation {
     /// Every frame in play order (frame 0 included, matching [`DecodedImage::pixels`]). Each is a
     /// complete canvas at the image's dimensions, so playback is a plain texture swap per frame.
     pub frames: Vec<AnimationFrame>,
+    /// Whether the sequence was cut short by a cap: 1 GiB of frames (less under a setup's own
+    /// `max_bytes`) or 10,000 of them (FD18). The frames kept still play.
+    pub truncated: bool,
 }
 
 impl DecodedImage {
     /// Run one whole-buffer transform over every pixel buffer this image owns — the canvas,
     /// then every animation frame — so the post-decode passes (EXIF orientation, ICC
-    /// conversion, downscale) can never leave `pixels` and [`Animation::frames`] describing
+    /// conversion, fit, narrowing) can never leave `pixels` and [`Animation::frames`] describing
     /// different images: frame 0 duplicates the canvas, and a pass that touched only `pixels`
-    /// would desync the moment playback starts. Today only GIF is animated and carries
-    /// neither EXIF nor ICC, but that is a property of the current format set, not an
-    /// invariant — the next animated format (WebP, AVIF) walks straight into any pass that
-    /// skipped the frames. Frames shorter than `needed` bytes (the canvas size the transform
-    /// assumes) are dropped rather than indexed past, and an animation left with no frames is
-    /// removed entirely.
+    /// would desync the moment playback starts. Frames shorter than `needed` bytes (the canvas
+    /// size the transform assumes) are dropped rather than indexed past, and an animation left
+    /// with no frames is removed entirely.
     pub(crate) fn transform_buffers(&mut self, needed: usize, mut f: impl FnMut(&mut Vec<u8>)) {
         // Every pass that rewrites the canvas comes through here, which makes this the one place
         // that has to invalidate a file-supplied mip chain: a rotated, colour-transformed or
@@ -425,44 +372,25 @@ impl DecodedImage {
     }
 }
 
-/// Options controlling a decode.
-#[derive(Debug, Clone, Copy)]
-pub struct DecodeOptions {
-    /// Max decoded dimension on either axis — a CPU/RAM guard, not a GPU texture limit.
-    /// Images larger than this on either axis are CPU-downscaled to fit (§6). An RGBA8
-    /// bitmap at 16384² is ~1 GiB; float HDR is 4×.
-    pub max_dim: u32,
-    /// Whether to parse and honor embedded ICC profiles via lcms2.
-    pub honor_icc: bool,
-}
-
-impl Default for DecodeOptions {
-    fn default() -> Self {
-        Self {
-            max_dim: 16384,
-            honor_icc: true,
-        }
-    }
-}
-
 /// Decode failure modes.
 ///
 /// There is deliberately no `UnknownFormat` variant: [`sniff`] always resolves to *some* backend
-/// (`Backend::Image` is the catch-all), so unrecognized input is not a routing failure — it is a
-/// backend rejecting bytes it cannot parse, and comes back as [`Malformed`](Self::Malformed). A
-/// variant that nothing can construct is a promise the type does not keep.
+/// (the `image` crate is the catch-all), so unrecognized input is not a routing failure — it is a
+/// backend rejecting bytes it cannot parse, and comes back as [`Malformed`](Self::Malformed).
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// The backend rejected the data as malformed — including input that is not an image at all.
     Malformed(String),
-    /// The image is past a decode guard ([`check_dims`]) — a decode bomb, or simply larger than
-    /// this build will allocate for.
+    /// The image is past the setup's [`Limits`] — a decode bomb, or simply larger than this setup
+    /// will allocate for.
     ///
     /// Kept distinct from [`Self::Malformed`] because *refusing* an image and *failing* to read
     /// one call for opposite responses: a decoder that merely failed may be worth retrying with
-    /// a different one, and a guard that fired must never be. Conflating them let a 65535x65535
-    /// JPEG that zune correctly refused get handed to the `image` crate, which obligingly
-    /// allocated it.
+    /// a different one, and a guard that fired must never be — not by a second decoder in the
+    /// same process. (bite retries any failure through ImageMagick, which runs in a process of
+    /// its own; FD10.) Conflating them let a 65535x65535 JPEG that zune correctly refused get
+    /// handed to the `image` crate, which obligingly allocated it.
     TooLarge(String),
     /// A PSD with no merged image: Photoshop saved it without "Maximize Compatibility". The layers
     /// are all there, but the flattened picture other tools read is not — Photoshop writes a
@@ -472,7 +400,13 @@ pub enum DecodeError {
     /// Its own variant so a caller can act on it without reading the message: a Unity import takes
     /// the merged image, so Asset Check tells the artist to re-save with Maximize Compatibility.
     NoMergedImage,
-    /// An FFI backend (psd_sdk/lcms2) failed; surfaced so the viewer survives.
+    /// A format this build was compiled without (its cargo feature is off).
+    Unsupported(Format),
+    /// The caller cancelled the decode through [`DecodeCtl::cancel`].
+    Cancelled,
+    /// The decode panicked. The crate caught it (FD7); the process is fine.
+    Panicked,
+    /// An FFI backend (psd_sdk, libheif, lcms2) failed; surfaced so the caller survives.
     Ffi(String),
     /// I/O or unexpected backend error.
     Other(String),
@@ -487,6 +421,16 @@ impl std::fmt::Display for DecodeError {
                 f,
                 "PSD has no merged image (re-save it with Maximize Compatibility)"
             ),
+            DecodeError::Unsupported(format) => match format.feature() {
+                Some(feature) => write!(
+                    f,
+                    "this build has no {} support (compiled without the \"{feature}\" feature)",
+                    format.name()
+                ),
+                None => write!(f, "this build has no {} support", format.name()),
+            },
+            DecodeError::Cancelled => write!(f, "decode cancelled"),
+            DecodeError::Panicked => write!(f, "the decoder panicked"),
             DecodeError::Ffi(m) => write!(f, "decoder FFI error: {m}"),
             DecodeError::Other(m) => write!(f, "{m}"),
         }
@@ -499,8 +443,8 @@ impl std::error::Error for DecodeError {}
 enum Backend {
     Psd,
     Exr,
-    /// HEIC/HEIF/AVIF via libheif; carries the status-bar label for the detected brand.
-    Heif(&'static str),
+    /// HEIC/HEIF/AVIF via libheif; carries which, from the `ftyp` brand.
+    Heif(Format),
     /// A zune-decodable format; carries zune's detected format for status-bar naming.
     Zune(zune_image::codecs::ImageFormat),
     /// A camera-raw file; carries the status-bar label for the detected raw family. The
@@ -532,27 +476,53 @@ enum Backend {
     Image,
 }
 
-/// Detect an ISOBMFF (HEIF-family) stream by its `ftyp` box brand and map it to a
-/// status-bar label. The layout is `[u32 box-size][b"ftyp"][u32 major-brand][...]`, so
-/// the major brand sits at bytes 8..12. Returns `None` for non-HEIF input.
-fn heif_label(bytes: &[u8]) -> Option<&'static str> {
+impl Backend {
+    /// The format this backend reads, for [`sniff`]. `bytes` and `ext` settle the catch-all.
+    fn format(&self, bytes: &[u8], ext: Option<&str>) -> Format {
+        match self {
+            Backend::Psd => Format::Psd,
+            Backend::Exr => Format::Exr,
+            Backend::Heif(f) => *f,
+            Backend::Zune(z) => zune_format(*z),
+            Backend::Raw(_) => Format::CameraRaw,
+            Backend::Gif => Format::Gif,
+            Backend::Tiff => Format::Tiff,
+            Backend::Hdr => Format::RadianceHdr,
+            Backend::Dds => Format::Dds,
+            Backend::Cur => Format::Cur,
+            Backend::Tga => Format::Tga,
+            Backend::Png => Format::Png,
+            Backend::Image => image::guess_format(bytes)
+                .ok()
+                .map(image_format)
+                .filter(|f| *f != Format::Unknown)
+                .or_else(|| ext.and_then(Format::from_extension))
+                .unwrap_or(Format::Unknown),
+        }
+    }
+}
+
+/// Detect an ISOBMFF (HEIF-family) stream by its `ftyp` box's major brand. The layout is
+/// `[u32 box-size][b"ftyp"][u32 major-brand][...]`, so the major brand sits at bytes 8..12.
+/// Returns `None` for non-HEIF input.
+fn heif_format(bytes: &[u8]) -> Option<Format> {
     if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
         return None;
     }
     match &bytes[8..12] {
-        b"avif" | b"avis" => Some("AVIF"),
+        b"avif" | b"avis" => Some(Format::Avif),
         // HEVC-in-HEIF brands.
         b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx" | b"hevm" | b"hevs" => {
-            Some("HEIC")
+            Some(Format::Heic)
         }
         // Generic HEIF (codec announced in compatible brands; libheif sorts it out).
-        b"mif1" | b"msf1" | b"mif2" => Some("HEIF"),
+        b"mif1" | b"msf1" | b"mif2" => Some(Format::Heif),
         _ => None,
     }
 }
 
-/// Whether `bytes` is an uncompressed true-colour TGA — the variant that wears the Windows
-/// cursor's magic.
+/// Whether `header` (the first bytes of a `len`-byte file) is an uncompressed true-colour TGA —
+/// the variant that wears the Windows cursor's magic.
 ///
 /// `00 00 02 00` is the `.cur` magic (two reserved bytes, then the type word `2`) and it is also,
 /// byte for byte, the start of the most ordinary TGA there is: id length 0, no colour map, image
@@ -568,9 +538,9 @@ fn heif_label(bytes: &[u8]) -> Option<&'static str> {
 /// its image count and its first directory entry's width and height land in the very fields this
 /// requires to be zero, so passing would mean a cursor holding no images whose first image is
 /// 0x0, which has nothing to decode either way.
-fn is_uncompressed_tga(bytes: &[u8]) -> bool {
+fn is_uncompressed_tga(header: &[u8], len: usize) -> bool {
     const HEADER: usize = 18;
-    let Some(h) = bytes.get(..HEADER) else {
+    let Some(h) = header.get(..HEADER) else {
         return false;
     };
     // Image type 2, and no colour map: type 0 with a zero origin, length and entry size.
@@ -584,10 +554,12 @@ fn is_uncompressed_tga(bytes: &[u8]) -> bool {
         return false;
     }
     // Header, then the optional image-id field, then one uncompressed pixel per texel.
-    HEADER + h[0] as usize + width * height * (depth as usize).div_ceil(8) <= bytes.len()
+    HEADER + h[0] as usize + width * height * (depth as usize).div_ceil(8) <= len
 }
 
-fn sniff(bytes: &[u8], ext: Option<&str>) -> Backend {
+/// The backend for a stream whose first bytes are `bytes`, `len` bytes long in all. A few KiB of
+/// the start is enough: nothing here looks further in (FD19's [`probe`] routes on a prefix).
+fn route(bytes: &[u8], len: usize, ext: Option<&str>) -> Backend {
     use zune_core::bytestream::ZCursor;
     use zune_image::codecs::{ImageFormat, guess_format};
 
@@ -597,9 +569,9 @@ fn sniff(bytes: &[u8], ext: Option<&str>) -> Backend {
     } else if bytes.starts_with(&[0x76, 0x2f, 0x31, 0x01]) {
         // OpenEXR magic number — handled by the `exr` crate (zune has no EXR decoder).
         Backend::Exr
-    } else if let Some(label) = heif_label(bytes) {
+    } else if let Some(format) = heif_format(bytes) {
         // HEIC/HEIF/AVIF — the ISOBMFF `ftyp` brands; decoded by libheif.
-        Backend::Heif(label)
+        Backend::Heif(format)
     } else if let Some(label) = raw::label(bytes, ext) {
         // Camera raw (CR2/CR3/NEF/ARW/RAF/DNG/…): display the embedded JPEG preview. Sniffed
         // before the zune/`image` fallback because TIFF-structured raws share TIFF's magic
@@ -620,7 +592,7 @@ fn sniff(bytes: &[u8], ext: Option<&str>) -> Backend {
         // Byte 2 is the ICO/CUR type word, 1 for an icon and 2 for a cursor — but a cursor is
         // not the only thing that claims this magic. An uncompressed true-colour TGA opens with
         // the same four bytes, so the header has to break the tie; see `is_uncompressed_tga`.
-        if is_uncompressed_tga(bytes) {
+        if is_uncompressed_tga(bytes, len) {
             Backend::Tga
         } else {
             // A cursor. The ICO decoder reads the payload unchanged.
@@ -647,53 +619,86 @@ fn sniff(bytes: &[u8], ext: Option<&str>) -> Backend {
     }
 }
 
-/// Decode an in-memory image, choosing a backend by magic bytes.
+/// The format `bytes` hold, by magic bytes, then by `ext_hint` (no leading dot, any case) for
+/// formats with no magic (TGA) or that share it (the TIFF-structured camera raws). Whatever this
+/// build decodes: a PSD is [`Format::Psd`] without the `psd` feature too. Unrecognised bytes with
+/// no telling extension are [`Format::Unknown`]. A few KiB of the file's start is enough.
+pub fn sniff(bytes: &[u8], ext_hint: Option<&str>) -> Format {
+    route(bytes, bytes.len(), ext_hint).format(bytes, ext_hint)
+}
+
+/// Decode an in-memory image, choosing a backend by magic bytes. A panic inside the decode comes
+/// back as [`DecodeError::Panicked`] (FD7).
 pub fn decode(
     bytes: &[u8],
     ext_hint: Option<&str>,
     opts: &DecodeOptions,
 ) -> Result<DecodedImage, DecodeError> {
-    decode_with_progress(bytes, ext_hint, opts, &|_| {})
+    decode_with_progress(bytes, ext_hint, opts, &DecodeCtl::NONE)
 }
 
-/// [`decode`], reporting how far the backend has got: `progress` is called on the decoding thread
-/// with a fraction in `0.0..=1.0` that only ever rises. Only the backends that can say — OpenEXR
-/// (per chunk) and Radiance HDR (per scanline read) — call it at all; for every other format the
-/// decode is one opaque step and `progress` is never called. The passes after the backend
-/// (orientation, ICC, downscale) are not counted.
+/// [`decode`], reporting how far the backend has got through `ctl.progress` and stopping when
+/// `ctl.cancel` says so (FD16). See [`DecodeCtl`] for which backends report. The passes after the
+/// backend (orientation, colour, fit, narrowing) are not counted.
 pub fn decode_with_progress(
     bytes: &[u8],
     ext_hint: Option<&str>,
     opts: &DecodeOptions,
-    progress: &dyn Fn(f32),
+    ctl: &DecodeCtl<'_>,
 ) -> Result<DecodedImage, DecodeError> {
-    let backend = sniff(bytes, ext_hint);
+    guarded(|| {
+        // The calling thread is one of the budget's for the whole decode (FD8).
+        let _seat = budget::Seat::take();
+        let cap = opts.max_threads.map_or(0, |n| n.max(1));
+        budget::with_cap(cap, || decode_inner(bytes, ext_hint, opts, ctl))
+    })
+}
+
+/// Run `f`, turning a panic into [`DecodeError::Panicked`]. The panic's message still goes to the
+/// panic hook (stderr by default).
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, DecodeError>) -> Result<T, DecodeError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(Err(DecodeError::Panicked))
+}
+
+fn decode_inner(
+    bytes: &[u8],
+    ext_hint: Option<&str>,
+    opts: &DecodeOptions,
+    ctl: &DecodeCtl<'_>,
+) -> Result<DecodedImage, DecodeError> {
+    let progress = Progress::new(ctl.progress);
+    let cx = Cx {
+        opts,
+        progress: &progress,
+        cancel: ctl.cancel,
+    };
+    let backend = route(bytes, bytes.len(), ext_hint);
     // Camera raw resolves its own orientation while walking the container for the preview
     // (`decode_raw`), and the preview it hands back is already upright — reading the file's TIFF
     // directory again below would rotate it a second time.
-    let honor_exif = !matches!(&backend, Backend::Raw(_));
+    let orients_itself = matches!(&backend, Backend::Raw(_));
 
     let mut img = match backend {
-        Backend::Psd => decode_psd(bytes)?,
-        Backend::Exr => decode_exr(bytes, progress)?,
-        Backend::Heif(label) => decode_heif(bytes, label)?,
-        Backend::Raw(label) => decode_raw(bytes, label)?,
-        Backend::Gif => decode_gif(bytes)?,
+        Backend::Psd => decode_psd(bytes, &cx)?,
+        Backend::Exr => decode_exr(bytes, &cx)?,
+        Backend::Heif(format) => decode_heif(bytes, format, &cx)?,
+        Backend::Raw(label) => decode_raw(bytes, label, &cx)?,
+        Backend::Gif => decode_gif(bytes, &cx)?,
         Backend::Tiff => {
             // The `ExtraSamples` fixup has to happen before the decoder is constructed — either
             // decoder — because both decide the sample layout at construction time.
             let patched = tiff::extra_sample_as_alpha(bytes);
-            match tiff::decode(&patched) {
+            match tiff::decode(&patched, &cx) {
                 Some(result) => result?,
-                None => decode_image(&patched, ext_hint)?,
+                None => decode_image(&patched, ext_hint, &cx)?,
             }
         }
-        Backend::Hdr => decode_hdr(bytes, progress)?,
-        Backend::Dds => dds::decode(bytes)?,
-        Backend::Cur => decode_cur(bytes)?,
+        Backend::Hdr => decode_hdr(bytes, &cx)?,
+        Backend::Dds => dds::decode(bytes, &cx)?,
+        Backend::Cur => decode_cur(bytes, &cx)?,
         // Sniffed from its header, so it needs no extension hint to name itself.
-        Backend::Tga => decode_image(bytes, Some("tga"))?,
-        Backend::Png => decode_png(bytes)?,
+        Backend::Tga => decode_image(bytes, Some("tga"), &cx)?,
+        Backend::Png => decode_png(bytes, &cx)?,
         // zune is the hot path, not the only path. It has gaps the `image` crate does not —
         // zune-bmp cannot read a 24-bit BMP narrower than 3 pixels, so a 1x1 colour swatch
         // failed to open at all — and where the fast decoder simply says no, retrying with the
@@ -703,10 +708,10 @@ pub fn decode_with_progress(
         // A guard rejection is emphatically NOT retried: `TooLarge` means we *decided* not to
         // decode this, and handing it to a second decoder would be walking around our own
         // decode-bomb defence.
-        Backend::Zune(fmt) => match decode_zune(bytes, fmt) {
+        Backend::Zune(fmt) => match decode_zune(bytes, fmt, &cx) {
             Ok(img) => img,
             Err(DecodeError::TooLarge(m)) => return Err(DecodeError::TooLarge(m)),
-            Err(zune_err) => match decode_image(bytes, ext_hint) {
+            Err(zune_err) => match decode_image(bytes, ext_hint, &cx) {
                 Ok(img) => img,
                 // The *fallback's* guard rejections keep their identity too: `TooLarge` means
                 // "we decided not to", and must stay distinguishable from "failed to decode"
@@ -716,31 +721,44 @@ pub fn decode_with_progress(
                 Err(_) => return Err(zune_err),
             },
         },
-        Backend::Image => decode_image(bytes, ext_hint)?,
+        Backend::Image => decode_image(bytes, ext_hint, &cx)?,
     };
+    cx.check_cancel()?;
 
-    // Rotate to the orientation the file asks for. First, before the ICC transform and the
-    // downscale, because it can swap width/height: doing it here is the only way `downscaled_from`
-    // and every dimension the viewer reports describe the same (upright) image. Orientation 1 —
+    // A float buffer is linear light (OpenEXR, Radiance HDR, float TIFF, 32-bit PSD, PFM); say so
+    // before narrowing can turn it into bytes.
+    if img.format.is_hdr() {
+        img.source.sample = Sample::Float;
+        if img.source.transfer == Transfer::Srgb {
+            img.source.transfer = Transfer::Linear;
+        }
+    }
+
+    // Rotate to the orientation the file asks for. First, before the colour transform and the
+    // fit, because it can swap width/height: doing it here is the only way `downscaled_from` and
+    // every dimension the viewer reports describe the same (upright) image. Orientation 1 —
     // almost every file — costs one tag lookup and no pixel work at all.
-    if honor_exif {
+    if opts.honor_exif && !orients_itself {
         exif::apply(&mut img, exif::orientation(bytes));
     }
 
-    // Honor an embedded ICC profile by transforming into the working space.
+    // An embedded ICC profile, or a wide-gamut nclx description with none, into sRGB.
+    #[cfg(feature = "icc")]
     if opts.honor_icc {
         icc::apply(&mut img);
+        cx.check_cancel()?;
     }
 
-    // Fit within the caller's max dimension (RAM guard).
-    downscale::to_fit(&mut img, opts.max_dim);
+    downscale::apply(&mut img, opts.fit);
+    narrow::apply(&mut img, opts.output);
+    cx.check_cancel()?;
 
-    // Flag a declared-but-fully-opaque alpha channel. The container format (`channels`) is left
-    // truthful — a 32-bit PNG screenshot still reports RGBA and keeps an inspectable alpha — but
-    // the viewer reads this to avoid defaulting to the checker backdrop when there is no actual
-    // transparency to reveal. Scanned on the final (post-ICC, post-downscale) buffer, i.e. exactly
-    // what is displayed; the scan short-circuits on the first transparent sample.
-    img.alpha_opaque = matches!(img.channels, 2 | 4) && alpha_is_opaque(&img);
+    // Flag a declared-but-fully-opaque alpha channel. The source's `channels` is left truthful —
+    // a 32-bit PNG screenshot still reports RGBA and keeps an inspectable alpha — but the viewer
+    // reads this to avoid defaulting to the checker backdrop when there is no actual transparency
+    // to reveal. Scanned on the final buffer, i.e. exactly what is returned; the scan
+    // short-circuits on the first transparent sample.
+    img.alpha_opaque = matches!(img.source.channels, 2 | 4) && alpha_is_opaque(&img);
 
     Ok(img)
 }
@@ -800,7 +818,7 @@ fn alpha_is_opaque(img: &DecodedImage) -> bool {
     !transparent.into_inner()
 }
 
-/// Convenience wrapper: read a file and decode it (used by the decode worker).
+/// Convenience wrapper: read a file and decode it.
 pub fn decode_path(path: &Path, opts: &DecodeOptions) -> Result<DecodedImage, DecodeError> {
     let bytes = std::fs::read(path).map_err(|e| DecodeError::Other(e.to_string()))?;
     let ext = path.extension().and_then(|e| e.to_str());
@@ -817,50 +835,51 @@ pub fn decode_path(path: &Path, opts: &DecodeOptions) -> Result<DecodedImage, De
 /// question is what the profile's colours *are*. A greyscale profile is sRGB when its tone curve
 /// is: every grey level lands on the same sRGB grey. Any other colour space, and a profile lcms2
 /// cannot parse, is not.
+#[cfg(feature = "icc")]
 pub fn icc_is_srgb(profile: &[u8]) -> bool {
     icc::is_srgb(profile)
 }
 
 // --- backends ---------------------------------------------------------------
 
-/// PSD via psd_sdk (C++ FFI). Runs inside catch_unwind so a Rust-side panic in the
-/// thin wrapper cannot escape; the C++ side additionally guards against C++ exceptions.
+/// PSD via psd_sdk (C++ FFI). The C++ side guards against its own exceptions; a Rust-side panic
+/// is caught by [`decode`]'s guard.
 #[cfg(feature = "psd")]
-fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+fn decode_psd(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     // Checked before psd_sdk runs, because psd_sdk cannot tell: the placeholder Photoshop writes
     // is a well-formed image section that decodes to a white canvas. One walk over the image
     // resources, no pixel work.
     if psd_layers::merged_image_is_placeholder(bytes) {
         return Err(DecodeError::NoMergedImage);
     }
-    // The wrapper checks the header against these before psd_sdk sizes a plane (FD3). Today's
-    // decode guards until step 3 gives each setup its own `limits` (FD5); the planar cap is twice
-    // the output's, and 56 channels is Photoshop's own limit.
+    // The wrapper checks the header against the setup's limits before psd_sdk sizes a plane
+    // (FD3); the planar cap is twice the output's, and 56 channels is Photoshop's own limit.
+    let lim = cx.limits();
     let limits = psd_sdk_sys::Limits {
-        max_dim: MAX_DECODE_DIM as u32,
-        max_output_bytes: MAX_DECODE_BYTES as u64,
-        max_planar_bytes: 2 * MAX_DECODE_BYTES as u64,
+        max_dim: lim.max_dim,
+        max_output_bytes: lim.max_bytes,
+        max_planar_bytes: lim.max_bytes.saturating_mul(2),
         max_channels: 56,
     };
-    let threads = thread_budget();
-    let result = std::panic::catch_unwind(|| psd_sdk_sys::decode_psd(bytes, &limits, threads))
-        .map_err(|_| DecodeError::Ffi("psd_sdk panicked".into()))?;
-    let psd = result.map_err(|e| match e {
+    // The bridge's threads come from the budget, held for the whole call (FD8).
+    let lease = budget::lease(budget::cores());
+    let psd = psd_sdk_sys::decode_psd(bytes, &limits, lease.threads()).map_err(|e| match e {
         psd_sdk_sys::PsdError::NoMergedImage => DecodeError::NoMergedImage,
         e @ psd_sdk_sys::PsdError::TooLarge { .. } => DecodeError::TooLarge(e.to_string()),
         e @ psd_sdk_sys::PsdError::OutOfMemory { .. } => DecodeError::Other(e.to_string()),
         e => DecodeError::Malformed(e.to_string()),
     })?;
+    drop(lease);
     // The buffer is already allocated (psd-sdk-sys sizes it, bounded by the C++ guard and
     // its own cap — it cannot wait for us, the dimensions live behind the FFI), so this
     // check_dims is enforcement of the shared policy rather than the allocation guard the
     // other backends use it as: the per-axis cap and byte budget hold for PSD too, even if
     // the guards on the far side of the boundary drift.
     let bps = (psd.bits_per_channel as usize).div_ceil(8);
-    check_dims(psd.width as usize, psd.height as usize, 4 * bps, "PSD")?;
+    cx.check_dims(psd.width as usize, psd.height as usize, 4 * bps, "PSD")?;
     // The wrapper hands back the document's own depth rather than always narrowing to 8-bit:
     // a 16-bit PSD keeps its precision (and a 32-bit one its linear/HDR range) instead of
-    // being flattened on the way in, and `bit_depth` now describes the buffer it labels.
+    // being flattened on the way in.
     let format = match psd.bits_per_channel {
         16 => PixelFormat::Rgba16Unorm,
         32 => PixelFormat::Rgba32Float,
@@ -879,11 +898,13 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         width: psd.width,
         height: psd.height,
         format,
-        bit_depth: psd.bits_per_channel.min(255) as u8,
-        channels: psd.channels.min(255) as u8,
-        palette: false,
+        source: SourceInfo::new(
+            Format::Psd,
+            "PSD",
+            psd.channels.min(255) as u8,
+            psd.bits_per_channel.min(255) as u8,
+        ),
         icc,
-        source_format: "PSD",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -892,15 +913,12 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     })
 }
 
-/// Stand-in for [`decode_psd`] when the crate is built without the vendored psd_sdk (CI's
-/// `--no-default-features` job; the shipped binary always has it). Routing deliberately does
-/// *not* change with the feature: the bytes really are a PSD, this build just cannot read one,
-/// and saying so is more honest than letting a fallback decoder mangle it.
+/// Stand-in for [`decode_psd`] when the crate is built without the vendored psd_sdk. Routing
+/// deliberately does *not* change with the feature: the bytes really are a PSD, this build just
+/// cannot read one, and saying so is more honest than letting a fallback decoder mangle it.
 #[cfg(not(feature = "psd"))]
-fn decode_psd(_bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
-    Err(DecodeError::Other(
-        "this build has no PSD support (compiled without the \"psd\" feature)".into(),
-    ))
+fn decode_psd(_bytes: &[u8], _cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    Err(DecodeError::Unsupported(Format::Psd))
 }
 
 /// The OpenEXR fast path: read the first layer's channels as the file stores them, then
@@ -917,7 +935,7 @@ fn decode_psd(_bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
 /// on that 16K HDRI that was ~1.2 s of a ~1.5 s open. `None` sends the file there anyway: a first
 /// layer without plain `R`, `G`, `B` channels (the names it requires), a subsampled channel, or
 /// anything this reader fails on.
-fn decode_exr_planes(bytes: &[u8], progress: &dyn Fn(f32)) -> Option<DecodedImage> {
+fn decode_exr_planes(bytes: &[u8], cx: &Cx) -> Option<DecodedImage> {
     use exr::prelude::*;
 
     let image = read()
@@ -926,7 +944,7 @@ fn decode_exr_planes(bytes: &[u8], progress: &dyn Fn(f32)) -> Option<DecodedImag
         .all_channels()
         .first_valid_layer()
         .all_attributes()
-        .on_progress(|p| progress(p as f32))
+        .on_progress(|p| cx.progress(p as f32))
         .from_buffered(Cursor::new(bytes))
         .ok()?;
     let layer = &image.layer_data;
@@ -996,7 +1014,14 @@ fn decode_exr_planes(bytes: &[u8], progress: &dyn Fn(f32)) -> Option<DecodedImag
     };
     let dims = (layer.size.width(), layer.size.height());
     let channels = if has_alpha { 4 } else { 3 };
-    Some(still(pixels, dims, format, channels, None, "OpenEXR"))
+    Some(still(
+        pixels,
+        dims,
+        format,
+        channels,
+        None,
+        (Format::Exr, "OpenEXR"),
+    ))
 }
 
 /// OpenEXR via the `exr` crate → 32-bit float RGBA (linear/HDR), for what
@@ -1006,7 +1031,7 @@ fn decode_exr_planes(bytes: &[u8], progress: &dyn Fn(f32)) -> Option<DecodedImag
 /// cannot fail: it allocates 16 bytes per declared pixel and hands the buffer back by value, so a
 /// crafted header would abort the process there ([`check_dims`]) with nothing able to intercept
 /// it. Reading the metadata separately is the only place a dimension check *can* refuse.
-fn decode_exr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, DecodeError> {
+fn decode_exr(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use exr::prelude::*;
 
     struct Buf {
@@ -1022,10 +1047,10 @@ fn decode_exr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, Deco
     for header in &meta.headers {
         let size = header.layer_size;
         // 16 bytes/px: the closure's `[f32; 4]` buffer, and again for the `Vec<u8>` built from it.
-        check_dims(size.width(), size.height(), 16, "OpenEXR")?;
+        cx.check_dims(size.width(), size.height(), 16, "OpenEXR")?;
     }
 
-    if let Some(img) = decode_exr_planes(bytes, progress) {
+    if let Some(img) = decode_exr_planes(bytes, cx) {
         return Ok(img);
     }
 
@@ -1049,7 +1074,7 @@ fn decode_exr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, Deco
         )
         .first_valid_layer()
         .all_attributes()
-        .on_progress(|p| progress(p as f32))
+        .on_progress(|p| cx.progress(p as f32))
         .from_buffered(Cursor::new(bytes))
         .map_err(|e| DecodeError::Malformed(e.to_string()))?;
 
@@ -1061,15 +1086,17 @@ fn decode_exr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, Deco
         width: size.width() as u32,
         height: size.height() as u32,
         format: PixelFormat::Rgba32Float,
-        bit_depth: 32,
         // Report what the file actually carries. An RGB-only EXR gets an opaque alpha lane
         // synthesized by the reader, and claiming 4 channels for it offered the viewer's
         // alpha UI over a channel the file never had — the same untruth a 24-bit TGA must not
         // tell (see `decode_image`).
-        channels: if buf.has_alpha { 4 } else { 3 },
-        palette: false,
+        source: SourceInfo::new(
+            Format::Exr,
+            "OpenEXR",
+            if buf.has_alpha { 4 } else { 3 },
+            32,
+        ),
         icc: None,
-        source_format: "OpenEXR",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -1079,56 +1106,63 @@ fn decode_exr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, Deco
 }
 
 /// HEIC/HEIF/AVIF via libheif (libde265 for HEVC, dav1d for AV1), through heif-sys's ABI v2
-/// (FD16). Runs inside catch_unwind as a backstop; the C++ wrapper catches its own exceptions,
-/// and libheif reports malformed input as an error code.
+/// (FD16). The C++ wrapper catches its own exceptions, and libheif reports malformed input as an
+/// error code.
 ///
-/// - **Limits:** the wrapper checks an item's signalled size against them before libheif decodes
-///   it, and sets libheif's own security limits from them. Today's decode guards until step 3
-///   gives each setup its own (FD5).
-/// - **Threads:** the budget; the wrapper gives a grid's tiles their own threads and a single
-///   image the codec's (FD8).
+/// - **Limits:** the setup's. The wrapper checks an item's signalled size against them before
+///   libheif decodes it, and sets libheif's own security limits from them.
+/// - **Threads:** a lease on the budget for the whole call; the wrapper gives a grid's tiles their
+///   own threads and a single image the codec's (FD8).
+/// - **Progress and cancel** go to libheif, which reports per grid tile.
 /// - **Sequence-only files** (no primary image) show their first frame (FD16).
 ///
-/// 8-bit sources come back as `Rgba8Unorm`; 10/12-bit as `Rgba16Unorm` scaled to full range.
-/// libheif converts to sRGB, so a PQ / HLG file comes back in libheif's own SDR rendering until
-/// step 6b adds `hdr: Linear`.
+/// 8-bit sources come back as `Rgba8Unorm`; 10/12-bit as `Rgba16Unorm` scaled to full range. The
+/// nclx box, when there is one, describes the source's transfer and primaries. libheif applies
+/// the YCbCr matrix but converts neither (measured in step 2b): a Display P3 file comes back in
+/// P3 for the `icc` pass to convert, and a PQ / HLG one as the encoded signal until step 6b.
 #[cfg(feature = "heif")]
-fn decode_heif(bytes: &[u8], label: &'static str) -> Result<DecodedImage, DecodeError> {
+fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use heif_sys::HeifError;
     const MAX_ICC_LEN: usize = 16 << 20;
+    let lim = cx.limits();
     let limits = heif_sys::Limits {
-        max_dim: MAX_DECODE_DIM as u32,
-        max_output_bytes: MAX_DECODE_BYTES as u64,
-        max_total_memory: 2 * MAX_DECODE_BYTES as u64,
+        max_dim: lim.max_dim,
+        max_output_bytes: lim.max_bytes,
+        max_total_memory: lim.max_bytes.saturating_mul(2),
         max_tiles: 0,
         max_sequence_frames: MAX_ANIMATION_FRAMES as u32,
         max_color_profile_size: MAX_ICC_LEN as u32,
     };
+    let lease = budget::lease(budget::cores());
+    let progress = |p: f32| cx.progress(p);
+    let cancel = || cx.cancelled();
     let ctl = heif_sys::Ctl {
-        library_threads: thread_budget(),
+        library_threads: lease.threads(),
+        progress: Some(&progress),
+        cancel: Some(&cancel),
         ..heif_sys::Ctl::default()
     };
-    let decode = || -> Result<(heif_sys::Image, Option<Vec<u8>>), HeifError> {
+    type Decoded = (heif_sys::Image, Option<Vec<u8>>, Option<heif_sys::Nclx>);
+    let decode = || -> Result<Decoded, HeifError> {
         let mut file = heif_sys::HeifFile::open(bytes, &limits)?;
         match file.primary_id() {
             Some(id) => {
                 let info = file.item_info(id)?;
                 let icc = file.item_icc(&info, MAX_ICC_LEN);
-                Ok((file.decode_item(id, &ctl)?, icc))
+                Ok((file.decode_item(id, &ctl)?, icc, info.nclx))
             }
             None => {
                 // No primary image: the first frame of the first visual track stands in.
                 let mut track = file.first_track()?;
                 let frame = track.next_frame(&ctl)?.ok_or(HeifError::NoImage)?;
-                Ok((frame, None))
+                Ok((frame, None, None))
             }
         }
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
-        .map_err(|_| DecodeError::Ffi("libheif panicked".into()))?;
-    let (img, icc) = result.map_err(|e| match e {
+    let (img, icc, nclx) = decode().map_err(|e| match e {
         HeifError::TooLarge => DecodeError::TooLarge(e.to_string()),
-        HeifError::OutOfMemory { .. } | HeifError::Cancelled => DecodeError::Other(e.to_string()),
+        HeifError::Cancelled => DecodeError::Cancelled,
+        HeifError::OutOfMemory { .. } => DecodeError::Other(e.to_string()),
         HeifError::Libheif(_) | HeifError::BadImage | HeifError::NoImage | HeifError::NotFound => {
             DecodeError::Malformed(e.to_string())
         }
@@ -1136,23 +1170,31 @@ fn decode_heif(bytes: &[u8], label: &'static str) -> Result<DecodedImage, Decode
             DecodeError::Ffi(e.to_string())
         }
     })?;
+    drop(lease);
 
-    let (format, bit_depth) = if img.is_16bit {
+    let (pixel_format, bit_depth) = if img.is_16bit {
         (PixelFormat::Rgba16Unorm, img.bit_depth)
     } else {
         (PixelFormat::Rgba8Unorm, 8)
     };
+    // Report the source channel count for the status bar (4 with alpha, else 3).
+    let mut source = SourceInfo::new(
+        format,
+        format.name(),
+        if img.has_alpha { 4 } else { 3 },
+        bit_depth,
+    );
+    if let Some(nclx) = nclx {
+        (source.transfer, source.primaries, source.hdr) =
+            source::from_nclx(nclx.transfer_characteristics, nclx.colour_primaries);
+    }
     Ok(DecodedImage {
         pixels: img.pixels,
         width: img.width,
         height: img.height,
-        format,
-        bit_depth,
-        // Report the source channel count for the status bar (4 with alpha, else 3).
-        channels: if img.has_alpha { 4 } else { 3 },
-        palette: false,
+        format: pixel_format,
+        source,
         icc,
-        source_format: label,
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -1164,10 +1206,8 @@ fn decode_heif(bytes: &[u8], label: &'static str) -> Result<DecodedImage, Decode
 /// Stand-in for [`decode_heif`] when the crate is built without the vendored libheif stack —
 /// see [`decode_psd`]'s counterpart for why this errors rather than rerouting.
 #[cfg(not(feature = "heif"))]
-fn decode_heif(_bytes: &[u8], label: &'static str) -> Result<DecodedImage, DecodeError> {
-    Err(DecodeError::Other(format!(
-        "this build has no {label} support (compiled without the \"heif\" feature)"
-    )))
+fn decode_heif(_bytes: &[u8], format: Format, _cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    Err(DecodeError::Unsupported(format))
 }
 
 /// Camera raw via embedded-preview extraction ([`raw`]). The raw container is not decoded;
@@ -1179,15 +1219,25 @@ fn decode_heif(_bytes: &[u8], label: &'static str) -> Result<DecodedImage, Decod
 ///
 /// Pure-Rust and bounds-checked end to end, but the worker pool still wraps the whole decode
 /// in `catch_unwind` as a backstop, same as every other backend.
-fn decode_raw(bytes: &[u8], label: &'static str) -> Result<DecodedImage, DecodeError> {
+#[cfg(feature = "raw")]
+fn decode_raw(bytes: &[u8], label: &'static str, cx: &Cx) -> Result<DecodedImage, DecodeError> {
     let preview = raw::find_preview(bytes)
         .ok_or_else(|| DecodeError::Malformed("raw file has no embedded JPEG preview".into()))?;
     // The preview is a JPEG; reuse the zune path (ICC + bit-depth + naming) then re-label it
-    // as the raw family and orient it.
-    let mut img = decode_zune(preview.jpeg, zune_image::codecs::ImageFormat::JPEG)?;
-    exif::apply(&mut img, preview.orientation);
-    img.source_format = label;
+    // as the raw family and, when the setup honours EXIF orientation, orient it.
+    let mut img = decode_zune(preview.jpeg, zune_image::codecs::ImageFormat::JPEG, cx)?;
+    if cx.opts.honor_exif {
+        exif::apply(&mut img, preview.orientation);
+    }
+    img.source.format = Format::CameraRaw;
+    img.source.name = label;
     Ok(img)
+}
+
+/// Stand-in for [`decode_raw`] in a build without `raw`.
+#[cfg(not(feature = "raw"))]
+fn decode_raw(_bytes: &[u8], _label: &'static str, _cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    Err(DecodeError::Unsupported(Format::CameraRaw))
 }
 
 /// Radiance HDR via the `image` crate → 32-bit float RGBA (linear/HDR).
@@ -1203,19 +1253,20 @@ fn decode_raw(bytes: &[u8], label: &'static str) -> Result<DecodedImage, DecodeE
 /// Non-strict mode accepts the `#?RGBE` signature variant and old signature-less `.pic`
 /// files that the strict `#?RADIANCE` check would reject. Radiance carries no ICC profile;
 /// the data is linear RGB, so the HDR exposure/tonemap path applies downstream.
-fn decode_hdr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, DecodeError> {
+fn decode_hdr(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use image::ImageDecoder;
 
     // RGBE is read front to back, scanline by scanline, so how far into the file the decoder has
     // read is how far through the image it is.
-    let reader = ProgressReader::new(bytes, progress);
+    let progress = |p: f32| cx.progress(p);
+    let reader = ProgressReader::new(bytes, &progress);
     let decoder = image::codecs::hdr::HdrDecoder::with_strictness(reader, false)
         .map_err(|e| DecodeError::Malformed(e.to_string()))?;
     // Constructed directly (not via `ImageReader`), so the reader's default memory limits don't
     // apply — the header guard is ours to make, exactly as in `decode_png`. `into_rgba32f_bytes` below
     // allocates 16 bytes per declared pixel.
     let (w, h) = decoder.dimensions();
-    check_dims(w as usize, h as usize, 16, "Radiance HDR")?;
+    cx.check_dims(w as usize, h as usize, 16, "Radiance HDR")?;
 
     let dynimg = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| DecodeError::Malformed(e.to_string()))?;
@@ -1228,11 +1279,9 @@ fn decode_hdr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, Deco
         width,
         height,
         format: PixelFormat::Rgba32Float,
-        bit_depth: 32,
-        channels: 3, // RGBE is always RGB; the alpha lane is added by normalization
-        palette: false,
+        // RGBE is always RGB; the alpha lane is added by normalization.
+        source: SourceInfo::new(Format::RadianceHdr, "Radiance HDR", 3, 32),
         icc: None,
-        source_format: "Radiance HDR",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -1409,9 +1458,9 @@ fn widen_to_rgba<T: Copy>(src: &[T], channels: usize, opaque: T, out: &mut [T]) 
 /// on 8192×4096 game textures: ~190 ms vs ~340 ms including RGBA normalization), and the
 /// gap is in the core decode, not wrapper overhead. Constructed directly rather than via
 /// `image::ImageReader` so the reader's default memory limits don't reject large-but-real
-/// images (a 216-MP scan trips them); the [`MAX_DECODE_DIM`] header guard here and the
-/// caller's `max_dim` downscale are the actual bomb/RAM guards, matching the zune path.
-fn decode_png(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+/// images (a 216-MP scan trips them); the [`check_dims`] header guard here and the setup's fit
+/// are the actual bomb/RAM guards, matching the zune path.
+fn decode_png(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use image::{DynamicImage, ImageDecoder};
 
     let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes))
@@ -1426,7 +1475,7 @@ fn decode_png(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         | image::ColorType::Rgba16 => 8,
         _ => 4,
     };
-    check_dims(width as usize, height as usize, out_bpp, "PNG")?;
+    cx.check_dims(width as usize, height as usize, out_bpp, "PNG")?;
     // Source channel count (status bar / alpha-aware UI) and ICC must be read before
     // `from_decoder` consumes the decoder. Palette sources already report their expanded
     // RGB/RGBA color type, matching what zune reported.
@@ -1461,11 +1510,11 @@ fn decode_png(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         width,
         height,
         format,
-        bit_depth,
-        channels: src_channels,
-        palette,
+        source: SourceInfo {
+            palette,
+            ..SourceInfo::new(Format::Png, "PNG", src_channels, bit_depth)
+        },
         icc,
-        source_format: "PNG",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -1502,6 +1551,7 @@ fn check_zune_dims(
     bytes: &[u8],
     fmt: zune_image::codecs::ImageFormat,
     opts: zune_core::options::DecoderOptions,
+    cx: &Cx,
 ) -> Result<(), DecodeError> {
     use zune_core::bit_depth::BitDepth;
     use zune_core::bytestream::ZCursor;
@@ -1524,16 +1574,17 @@ fn check_zune_dims(
         BitDepth::Float32 => 16,
         _ => 4,
     };
-    check_dims(width, height, bpp, zune_format_name(fmt))
+    cx.check_dims(width, height, bpp, zune_format_name(fmt))
 }
 
 /// The speed-first options every zune decoder runs with: platform intrinsics and unsafe fast
-/// paths on, and the dimension guard raised well past zune's 16384 default so large sources
-/// decode (the downscale pass shrinks anything beyond the caller's `max_dim` afterwards).
-fn zune_options() -> zune_core::options::DecoderOptions {
+/// paths on, and the dimension guard set to the setup's own rather than zune's 16384 default, so
+/// large sources decode (the fit pass shrinks them afterwards).
+fn zune_options(cx: &Cx) -> zune_core::options::DecoderOptions {
+    let max = cx.limits().max_dim as usize;
     zune_core::options::DecoderOptions::new_fast()
-        .set_max_width(MAX_DECODE_DIM)
-        .set_max_height(MAX_DECODE_DIM)
+        .set_max_width(max)
+        .set_max_height(max)
 }
 
 /// The hot path: zune for JPEG/BMP/QOI/PPM/WebP/farbfeld/JPEG-XL.
@@ -1546,21 +1597,22 @@ fn zune_options() -> zune_core::options::DecoderOptions {
 fn decode_zune(
     bytes: &[u8],
     fmt: zune_image::codecs::ImageFormat,
+    cx: &Cx,
 ) -> Result<DecodedImage, DecodeError> {
     use zune_image::codecs::ImageFormat as Z;
     let direct = match fmt {
-        Z::JPEG => Some(decode_jpeg(bytes)?),
-        Z::BMP => decode_bmp(bytes)?,
-        Z::QOI => Some(decode_qoi(bytes)?),
-        Z::PPM => decode_ppm(bytes)?,
-        Z::Farbfeld => Some(decode_farbfeld(bytes)?),
-        Z::WEBP => decode_webp(bytes)?,
-        Z::JPEG_XL => decode_jxl(bytes)?,
+        Z::JPEG => Some(decode_jpeg(bytes, cx)?),
+        Z::BMP => decode_bmp(bytes, cx)?,
+        Z::QOI => Some(decode_qoi(bytes, cx)?),
+        Z::PPM => decode_ppm(bytes, cx)?,
+        Z::Farbfeld => Some(decode_farbfeld(bytes, cx)?),
+        Z::WEBP => decode_webp(bytes, cx)?,
+        Z::JPEG_XL => decode_jxl(bytes, cx)?,
         _ => None,
     };
     match direct {
         Some(img) => Ok(img),
-        None => decode_zune_image(bytes, fmt),
+        None => decode_zune_image(bytes, fmt, cx),
     }
 }
 
@@ -1568,30 +1620,23 @@ fn malformed(e: impl std::fmt::Debug) -> DecodeError {
     DecodeError::Malformed(format!("{e:?}"))
 }
 
-/// The fields every still, single-level image fills the same way.
+/// The fields every still, single-level image fills the same way; the source's bit depth is the
+/// buffer's.
 fn still(
     pixels: Vec<u8>,
     (width, height): (usize, usize),
     format: PixelFormat,
     channels: u8,
     icc: Option<Vec<u8>>,
-    source_format: &'static str,
+    (source_format, name): (Format, &'static str),
 ) -> DecodedImage {
-    let bit_depth = match format {
-        PixelFormat::Rgba8Unorm => 8,
-        PixelFormat::Rgba16Unorm | PixelFormat::Rgba16Float => 16,
-        PixelFormat::Rgba32Float => 32,
-    };
     DecodedImage {
         pixels,
         width: width as u32,
         height: height as u32,
         format,
-        bit_depth,
-        channels,
-        palette: false,
+        source: SourceInfo::new(source_format, name, channels, format.bits()),
         icc,
-        source_format,
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -1621,7 +1666,7 @@ fn zune_rgba8(cs: zune_core::colorspace::ColorSpace, px: Vec<u8>) -> Option<(Vec
 /// CMYK/YCCK are decoded to RGB and widened rather than asked for as RGBA: zune-jpeg's RGBA output
 /// converts ink through a different path than its RGB one, and the RGB one is what fire has
 /// always shown.
-fn decode_jpeg(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+fn decode_jpeg(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use zune_core::bytestream::ZCursor;
     use zune_core::colorspace::ColorSpace;
 
@@ -1629,7 +1674,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     // per-component output state from it there — so CMYK, which only the header reveals, costs a
     // second (microseconds-long) header parse.
     let open = |out: ColorSpace| -> Result<_, DecodeError> {
-        let opts = zune_options().jpeg_set_out_colorspace(out);
+        let opts = zune_options(cx).jpeg_set_out_colorspace(out);
         let mut d = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), opts);
         d.decode_headers().map_err(malformed)?;
         Ok(d)
@@ -1639,7 +1684,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         .info()
         .ok_or_else(|| malformed("JPEG has no frame header"))?;
     let dims = (info.width as usize, info.height as usize);
-    check_dims(dims.0, dims.1, 4, "JPEG")?;
+    cx.check_dims(dims.0, dims.1, 4, "JPEG")?;
     let input = d.input_colorspace().unwrap_or(ColorSpace::RGB);
     let ink = matches!(input, ColorSpace::CMYK | ColorSpace::YCCK);
     if ink {
@@ -1657,7 +1702,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         PixelFormat::Rgba8Unorm,
         channels,
         icc,
-        "JPEG",
+        (Format::Jpeg, "JPEG"),
     ))
 }
 
@@ -1665,7 +1710,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
 /// through the `image` crate, whose 32-bit and palette paths measured 3× and 1.8× faster than
 /// zune-bmp's on an 8192² file (156 vs 502 ms, 264 vs 476 ms) for identical pixels. `None`
 /// (→ the generic zune path) only for a 24-bit layout zune hands back as something unexpected.
-fn decode_bmp(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
+fn decode_bmp(bytes: &[u8], cx: &Cx) -> Result<Option<DecodedImage>, DecodeError> {
     use zune_core::bytestream::ZCursor;
 
     // BITMAPINFOHEADER and every later version: header size at 14, bits per pixel at 28. The
@@ -1681,30 +1726,38 @@ fn decode_bmp(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
     if !(le32(14).is_some_and(|h| h >= 40) && le16(28) == Some(24)) {
-        return decode_image(bytes, Some("bmp")).map(Some);
+        return decode_image(bytes, Some("bmp"), cx).map(Some);
     }
-    let mut d = zune_bmp::BmpDecoder::new_with_options(ZCursor::new(bytes), zune_options());
+    let mut d = zune_bmp::BmpDecoder::new_with_options(ZCursor::new(bytes), zune_options(cx));
     d.decode_headers().map_err(malformed)?;
     let dims = d
         .dimensions()
         .ok_or_else(|| malformed("BMP has no dimensions"))?;
-    check_dims(dims.0, dims.1, 4, "BMP")?;
+    cx.check_dims(dims.0, dims.1, 4, "BMP")?;
     let cs = d
         .colorspace()
         .ok_or_else(|| malformed("BMP has no colorspace"))?;
     let px = d.decode().map_err(malformed)?;
-    Ok(zune_rgba8(cs, px)
-        .map(|(pixels, ch)| still(pixels, dims, PixelFormat::Rgba8Unorm, ch, None, "BMP")))
+    Ok(zune_rgba8(cs, px).map(|(pixels, ch)| {
+        still(
+            pixels,
+            dims,
+            PixelFormat::Rgba8Unorm,
+            ch,
+            None,
+            (Format::Bmp, "BMP"),
+        )
+    }))
 }
 
 /// QOI through the `qoi` crate, decoded straight to RGBA — an RGB file gets its opaque alpha in
 /// the same pass. QOI is a strictly sequential format, so the decoder's inner loop is the whole
 /// cost: zune-qoi spent ~530 ms on an 8192² RGBA file that this does in a fraction of that.
-fn decode_qoi(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+fn decode_qoi(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     let d = qoi::Decoder::new(bytes).map_err(malformed)?;
     let header = *d.header();
     let dims = (header.width as usize, header.height as usize);
-    check_dims(dims.0, dims.1, 4, "QOI")?;
+    cx.check_dims(dims.0, dims.1, 4, "QOI")?;
     let pixels = d
         .with_channels(qoi::Channels::Rgba)
         .decode_to_vec()
@@ -1716,18 +1769,18 @@ fn decode_qoi(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         PixelFormat::Rgba8Unorm,
         channels,
         None,
-        "QOI",
+        (Format::Qoi, "QOI"),
     ))
 }
 
 /// PPM/PGM/PBM/PAM, and the float PFM, at the file's own depth.
-fn decode_ppm(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
+fn decode_ppm(bytes: &[u8], cx: &Cx) -> Result<Option<DecodedImage>, DecodeError> {
     use zune_core::bit_depth::BitDepth;
     use zune_core::bytestream::ZCursor;
     use zune_core::colorspace::ColorSpace;
     use zune_core::result::DecodingResult;
 
-    let mut d = zune_ppm::PPMDecoder::new_with_options(ZCursor::new(bytes), zune_options());
+    let mut d = zune_ppm::PPMDecoder::new_with_options(ZCursor::new(bytes), zune_options(cx));
     d.decode_headers().map_err(malformed)?;
     let dims = d
         .dimensions()
@@ -1747,7 +1800,7 @@ fn decode_ppm(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
         Some(BitDepth::Float32) => 4,
         _ => 1,
     };
-    check_dims(dims.0, dims.1, 4 * sample, "PPM")?;
+    cx.check_dims(dims.0, dims.1, 4 * sample, "PPM")?;
     let (pixels, format) = match d.decode().map_err(malformed)? {
         DecodingResult::U8(v) => (rgba_bytes(&v, channels, u8::MAX), PixelFormat::Rgba8Unorm),
         DecodingResult::U16(v) => (rgba_bytes(&v, channels, u16::MAX), PixelFormat::Rgba16Unorm),
@@ -1760,7 +1813,7 @@ fn decode_ppm(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
         format,
         channels as u8,
         None,
-        "PPM",
+        (Format::Pnm, "PPM"),
     )))
 }
 
@@ -1768,7 +1821,7 @@ fn decode_ppm(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
 /// `decode` sizes the output in bytes and then checks it as a count of `u16`s ("Too small output
 /// buffer size"). The format is a 16-byte header — `farbfeld`, then width and height as big-endian
 /// `u32` — and big-endian 16-bit RGBA, so all there is to do is swap each sample to native order.
-fn decode_farbfeld(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+fn decode_farbfeld(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     let header = bytes
         .get(..16)
         .filter(|h| h.starts_with(b"farbfeld"))
@@ -1777,7 +1830,7 @@ fn decode_farbfeld(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
     };
     let dims = (be32(8) as usize, be32(12) as usize);
-    check_dims(dims.0, dims.1, 8, "Farbfeld")?;
+    cx.check_dims(dims.0, dims.1, 8, "Farbfeld")?;
     let len = dims.0 * dims.1 * 8;
     let data = bytes
         .get(16..16 + len)
@@ -1795,7 +1848,7 @@ fn decode_farbfeld(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         PixelFormat::Rgba16Unorm,
         4,
         None,
-        "Farbfeld",
+        (Format::Farbfeld, "Farbfeld"),
     ))
 }
 
@@ -1809,7 +1862,7 @@ fn decode_farbfeld(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
 ///   that threads cannot help, and there image-webp measured slightly ahead (~1.01 s vs ~1.10 s).
 ///
 /// Neither decoder's still-image path reads the `ICCP` chunk, so it is read here.
-fn decode_webp(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
+fn decode_webp(bytes: &[u8], cx: &Cx) -> Result<Option<DecodedImage>, DecodeError> {
     use libwebp_sys as webp;
 
     let status = |s: webp::VP8StatusCode| match s {
@@ -1825,7 +1878,7 @@ fn decode_webp(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
         return Ok(None);
     }
     let dims = (config.input.width as usize, config.input.height as usize);
-    check_dims(dims.0, dims.1, 4, "WebP")?;
+    cx.check_dims(dims.0, dims.1, 4, "WebP")?;
     let channels = if config.input.has_alpha != 0 { 4 } else { 3 };
     let icc = exif::webp_chunk(bytes, b"ICCP").map(<[u8]>::to_vec);
     const LOSSLESS: std::ffi::c_int = 2; // `WebPBitstreamFeatures::format`: 1 lossy, 2 lossless
@@ -1847,7 +1900,7 @@ fn decode_webp(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
             PixelFormat::Rgba8Unorm,
             channels,
             icc,
-            "WebP",
+            (Format::WebP, "WebP"),
         )));
     }
 
@@ -1876,7 +1929,7 @@ fn decode_webp(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
         PixelFormat::Rgba8Unorm,
         channels,
         icc,
-        "WebP",
+        (Format::WebP, "WebP"),
     )))
 }
 
@@ -1892,7 +1945,7 @@ fn decode_webp(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
 /// Float-sample and HDR (PQ/HLG) files keep the old `f32` path, as does anything with channels
 /// beyond colour and alpha (CMYK's black, spot colours), by returning `None`. Only keyframe 0 is
 /// rendered; the zune wrapper rendered every frame of an animation to keep the first.
-fn decode_jxl(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
+fn decode_jxl(bytes: &[u8], cx: &Cx) -> Result<Option<DecodedImage>, DecodeError> {
     let img = jxl_oxide::JxlImage::builder()
         .read(Cursor::new(bytes))
         .map_err(malformed)?;
@@ -1914,7 +1967,7 @@ fn decode_jxl(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
     } else {
         PixelFormat::Rgba16Unorm
     };
-    check_dims(dims.0, dims.1, format.bytes_per_pixel(), "JPEG XL")?;
+    cx.check_dims(dims.0, dims.1, format.bytes_per_pixel(), "JPEG XL")?;
 
     let render = img.render_frame(0).map_err(malformed)?;
     // One buffer per channel, orientation applied; alpha follows the colour channels.
@@ -1939,7 +1992,7 @@ fn decode_jxl(bytes: &[u8]) -> Result<Option<DecodedImage>, DecodeError> {
         format,
         channels as u8,
         icc,
-        "JPEG XL",
+        (Format::JpegXl, "JPEG XL"),
     )))
 }
 
@@ -1980,17 +2033,18 @@ fn quantize_planes<const PX: usize>(planes: &[&[f32]], n: usize, max: f32) -> Ve
 fn decode_zune_image(
     bytes: &[u8],
     fmt: zune_image::codecs::ImageFormat,
+    cx: &Cx,
 ) -> Result<DecodedImage, DecodeError> {
     use zune_core::bit_depth::BitDepth;
     use zune_core::bytestream::ZCursor;
     use zune_core::colorspace::ColorSpace;
     use zune_image::image::Image;
 
-    let opts = zune_options();
+    let opts = zune_options(cx);
 
     // zune's options cap each *axis* but nothing caps the product, which is what actually gets
     // allocated — so this is the guard that matters, and it has to happen before `Image::read`.
-    check_zune_dims(bytes, fmt, opts)?;
+    check_zune_dims(bytes, fmt, opts, cx)?;
 
     let mut image = Image::read(ZCursor::new(bytes), opts)
         .map_err(|e| DecodeError::Malformed(e.to_string()))?;
@@ -2038,17 +2092,36 @@ fn decode_zune_image(
         width: width as u32,
         height: height as u32,
         format: pixel_format,
-        bit_depth,
-        channels: src_channels,
-        palette: false,
+        source: SourceInfo::new(
+            zune_format(fmt),
+            zune_format_name(fmt),
+            src_channels,
+            bit_depth,
+        ),
         icc,
-        source_format: zune_format_name(fmt),
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
         layout: None,
         animation: None,
     })
+}
+
+/// The [`Format`] of a zune-routed stream.
+fn zune_format(f: zune_image::codecs::ImageFormat) -> Format {
+    use zune_image::codecs::ImageFormat::*;
+    match f {
+        JPEG => Format::Jpeg,
+        PPM => Format::Pnm,
+        Farbfeld => Format::Farbfeld,
+        QOI => Format::Qoi,
+        JPEG_XL => Format::JpegXl,
+        BMP => Format::Bmp,
+        WEBP => Format::WebP,
+        PNG => Format::Png,
+        HDR => Format::RadianceHdr,
+        _ => Format::Unknown,
+    }
 }
 
 fn zune_format_name(f: zune_image::codecs::ImageFormat) -> &'static str {
@@ -2073,7 +2146,7 @@ fn zune_format_name(f: zune_image::codecs::ImageFormat) -> &'static str {
 /// format), and decoding all frames up front keeps the viewer/renderer trivial (a texture swap per
 /// frame). Frame 0's pixels are duplicated into `DecodedImage::pixels` so the still-image code paths
 /// (first paint, downscale, alpha scan) work unchanged.
-fn decode_gif(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+fn decode_gif(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use image::codecs::gif::GifDecoder;
     use image::{AnimationDecoder, ImageDecoder};
 
@@ -2087,23 +2160,34 @@ fn decode_gif(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     // GIF's dimensions are `u16`, so even the maximum 65535×65535 is under every per-axis cap while
     // asking for 17 GiB a frame. Hence: one byte-budget check on the canvas, one on the sequence.
     let (w, h) = decoder.dimensions();
-    check_dims(w as usize, h as usize, 4, "GIF")?;
-    let frame_bytes = (w as usize)
-        .saturating_mul(h as usize)
-        .saturating_mul(4)
-        .max(1);
-    let max_frames = (MAX_ANIMATION_BYTES / frame_bytes).clamp(1, MAX_ANIMATION_FRAMES);
+    cx.check_dims(w as usize, h as usize, 4, "GIF")?;
+    let frame_bytes = (w as u64 * h as u64 * 4).max(1);
+    let sequence_bytes = MAX_ANIMATION_BYTES.min(cx.limits().max_bytes);
+    let max_frames = match cx.opts.frames {
+        Frames::First => 1,
+        Frames::All => ((sequence_bytes / frame_bytes) as usize).clamp(1, MAX_ANIMATION_FRAMES),
+    };
 
     // Collected one at a time rather than through `collect_frames`, so the budget can stop the walk
     // rather than discover it too late. Frames past the budget are dropped rather than raising an
-    // error — a truncated animation still shows, and no real encoder gets anywhere near the cap.
+    // error — a truncated animation still shows, flagged as such — and no real encoder gets
+    // anywhere near the cap.
     let mut frames = Vec::new();
-    for frame in decoder.into_frames() {
+    let mut walk = decoder.into_frames();
+    for frame in walk.by_ref() {
         frames.push(frame.map_err(|e| DecodeError::Malformed(e.to_string()))?);
         if frames.len() >= max_frames {
             break;
         }
+        if cx.cancelled() {
+            return Err(DecodeError::Cancelled);
+        }
     }
+    // Whether a cap cut the sequence short: there is a frame after the last one kept. `First`
+    // asked for one frame, which is not a cut.
+    let truncated = cx.opts.frames == Frames::All
+        && frames.len() >= max_frames
+        && walk.next().is_some_and(|f| f.is_ok());
 
     let first = frames
         .first()
@@ -2130,6 +2214,7 @@ fn decode_gif(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
                 }
             })
             .collect(),
+        truncated,
     });
 
     Ok(DecodedImage {
@@ -2137,13 +2222,10 @@ fn decode_gif(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         width,
         height,
         format: PixelFormat::Rgba8Unorm,
-        bit_depth: 8,
         // GIF is palette-indexed with an optional transparent index → report RGBA (frames can
         // carry transparency); the opaque-alpha scan in `decode` flags the fully-opaque case.
-        channels: 4,
-        palette: false,
+        source: SourceInfo::new(Format::Gif, "GIF", 4, 8),
         icc: None,
-        source_format: "GIF",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -2164,13 +2246,18 @@ fn decode_gif(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
 /// "colour planes" and "bits per pixel" fields reused for the hotspot coordinates — neither of
 /// which the `image` crate's ICO decoder needs, so the payload reads unchanged. All this does is
 /// name the format for the decoder that will not sniff it, and label it honestly afterwards.
-fn decode_cur(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
-    let mut img = decode_image(bytes, Some("ico"))?;
-    img.source_format = "CUR";
+fn decode_cur(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    let mut img = decode_image(bytes, Some("ico"), cx)?;
+    img.source.format = Format::Cur;
+    img.source.name = "CUR";
     Ok(img)
 }
 
-fn decode_image(bytes: &[u8], ext_hint: Option<&str>) -> Result<DecodedImage, DecodeError> {
+fn decode_image(
+    bytes: &[u8],
+    ext_hint: Option<&str>,
+    cx: &Cx,
+) -> Result<DecodedImage, DecodeError> {
     use image::DynamicImage;
 
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
@@ -2197,7 +2284,7 @@ fn decode_image(bytes: &[u8], ext_hint: Option<&str>) -> Result<DecodedImage, De
     // The same byte budget every other backend applies, and the only one on this path: the
     // reader is constructed directly, so the `image` crate's own default memory limits never
     // engage, and `from_decoder` below allocates whatever the header claims.
-    check_dims(
+    cx.check_dims(
         dims.0 as usize,
         dims.1 as usize,
         4 * usize::from(color.bytes_per_pixel() / color.channel_count()).max(1),
@@ -2226,17 +2313,42 @@ fn decode_image(bytes: &[u8], ext_hint: Option<&str>) -> Result<DecodedImage, De
         width,
         height,
         format: fmt,
-        bit_depth,
-        channels: src_channels,
-        palette: false,
+        source: SourceInfo::new(
+            format.map_or(Format::Unknown, image_format),
+            format.map_or("image", format_name),
+            src_channels,
+            bit_depth,
+        ),
         icc,
-        source_format: format.map_or("image", format_name),
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
         layout: None,
         animation: None,
     })
+}
+
+/// The [`Format`] of a stream the `image` crate recognised.
+fn image_format(f: image::ImageFormat) -> Format {
+    use image::ImageFormat as I;
+    match f {
+        I::Png => Format::Png,
+        I::Jpeg => Format::Jpeg,
+        I::Gif => Format::Gif,
+        I::Bmp => Format::Bmp,
+        I::Tiff => Format::Tiff,
+        I::Tga => Format::Tga,
+        I::Ico => Format::Ico,
+        I::WebP => Format::WebP,
+        I::Hdr => Format::RadianceHdr,
+        I::OpenExr => Format::Exr,
+        I::Qoi => Format::Qoi,
+        I::Pnm => Format::Pnm,
+        I::Farbfeld => Format::Farbfeld,
+        I::Dds => Format::Dds,
+        I::Avif => Format::Avif,
+        _ => Format::Unknown,
+    }
 }
 
 fn format_name(f: image::ImageFormat) -> &'static str {
@@ -2255,475 +2367,14 @@ fn format_name(f: image::ImageFormat) -> &'static str {
     }
 }
 
-// --- ICC ---------------------------------------------------------------------
-
-mod icc {
-    //! ICC handling via lcms2 (C FFI). The backends extract the embedded profile onto
-    //! [`DecodedImage::icc`]; here we transform the pixels into the sRGB working space so
-    //! a Display-P3 / Adobe-RGB / etc. image displays with correct color on the (sRGB)
-    //! surface. Best-effort: any failure (bad profile, unsupported layout) leaves the
-    //! pixels untouched, i.e. falls back to assuming the data is already sRGB.
-
-    use crate::{DecodedImage, PixelFormat};
-
-    /// Transform `img`'s pixels from their embedded ICC profile into sRGB, in place.
-    ///
-    /// No-op when there is no profile, for HDR/float data (linear working space; our
-    /// float backends never carry an ICC), or for non-RGB profiles (our pixels are RGBA,
-    /// so a CMYK/Gray profile would be misapplied — we assume sRGB instead).
-    pub fn apply(img: &mut DecodedImage) {
-        let Some(icc) = img.icc.clone() else { return };
-        if img.format.is_hdr() {
-            return;
-        }
-        // FFI safety boundary (§6/§15): a malformed profile must never unwind into and
-        // crash the viewer process. catch_unwind + best-effort: on any failure we keep
-        // the original pixels (sRGB assumption).
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            transform_to_srgb(img, &icc);
-        }));
-    }
-
-    fn transform_to_srgb(img: &mut DecodedImage, icc: &[u8]) {
-        use lcms2::{
-            ColorSpaceSignature, DisallowCache, Flags, Intent, PixelFormat as Fmt, Profile,
-            ThreadContext, Transform,
-        };
-
-        // The transform is shared by the threads `par_chunks_mut` runs it on, which lcms2 allows
-        // only for a transform made in a `ThreadContext` with NO_CACHE (its `Sync` bound). The
-        // one-pixel cache given up is worthless on photographic data anyway.
-        let ctx = ThreadContext::new();
-        let Ok(src) = Profile::new_icc_context(&ctx, icc) else {
-            return;
-        };
-        // Only RGB(A) source profiles map cleanly onto our RGBA pixels.
-        if src.color_space() != ColorSpaceSignature::RgbData {
-            return;
-        }
-        let dst = Profile::new_srgb_context(&ctx);
-        // Perceptual: the usual choice for displaying photographic images. COPY_ALPHA so
-        // the alpha channel passes through untouched (lcms only transforms color).
-        let intent = Intent::Perceptual;
-        let flags = Flags::COPY_ALPHA | Flags::NO_CACHE;
-
-        if is_srgb_equivalent(&ctx, &src, &dst, intent) {
-            return;
-        }
-
-        // The same conversion runs over the canvas and every animation frame
-        // (`transform_buffers`): a converted canvas over unconverted frames would visibly
-        // shift color the moment playback starts.
-        let needed = (img.width as usize)
-            .saturating_mul(img.height as usize)
-            .saturating_mul(img.format.bytes_per_pixel());
-        match img.format {
-            PixelFormat::Rgba8Unorm => {
-                let t: Transform<[u8; 4], [u8; 4], ThreadContext, DisallowCache> =
-                    match Transform::new_flags_context(
-                        &ctx,
-                        &src,
-                        Fmt::RGBA_8,
-                        &dst,
-                        Fmt::RGBA_8,
-                        intent,
-                        flags,
-                    ) {
-                        Ok(t) => t,
-                        Err(_) => return,
-                    };
-                img.transform_buffers(needed, |pixels| {
-                    crate::par_chunks_mut(pixels, 4, |_, part| {
-                        if let Ok(px) = bytemuck::try_cast_slice_mut::<u8, [u8; 4]>(part) {
-                            t.transform_in_place(px);
-                        }
-                    });
-                });
-            }
-            PixelFormat::Rgba16Unorm => {
-                let t: Transform<[u16; 4], [u16; 4], ThreadContext, DisallowCache> =
-                    match Transform::new_flags_context(
-                        &ctx,
-                        &src,
-                        Fmt::RGBA_16,
-                        &dst,
-                        Fmt::RGBA_16,
-                        intent,
-                        flags,
-                    ) {
-                        Ok(t) => t,
-                        Err(_) => return,
-                    };
-                // 16-bit pixels are native-endian u16 bytes; cast may fail on alignment,
-                // in which case we skip (sRGB assumption) rather than panic.
-                img.transform_buffers(needed, |pixels| {
-                    crate::par_chunks_mut(pixels, 8, |_, part| {
-                        if let Ok(px) = bytemuck::try_cast_slice_mut::<u8, [u16; 4]>(part) {
-                            t.transform_in_place(px);
-                        }
-                    });
-                });
-            }
-            // Float is handled by the is_hdr() early-out in apply().
-            _ => {}
-        }
-    }
-
-    /// Whether converting from `src` to sRGB would leave every colour within one 8-bit code of
-    /// where it started — i.e. the embedded profile *is* sRGB, as it is in every Photoshop export
-    /// and most camera JPEGs. Running lcms over such an image costs ~9 ns a pixel (over half a
-    /// second at 8192²) to move a fraction of a percent of colours by a single code: that is the
-    /// quantization of the profile's sampled tone curve against lcms's parametric one, not a
-    /// colour change, so the transform is skipped.
-    ///
-    /// Probed rather than recognized by name or hash, because sRGB ships under dozens of
-    /// descriptions and byte layouts. The probe is a 17³ lattice (every 16th code, plus 255) for
-    /// the matrix and full 256-step ramps — grey and each primary alone — for the tone curves,
-    /// ~6k colours for ~0.1 ms. A matrix-shaper profile that differs from sRGB by more than one
-    /// code anywhere differs on that probe, because both of its parts are smooth.
-    fn is_srgb_equivalent(
-        ctx: &lcms2::ThreadContext,
-        src: &lcms2::Profile<lcms2::ThreadContext>,
-        dst: &lcms2::Profile<lcms2::ThreadContext>,
-        intent: lcms2::Intent,
-    ) -> bool {
-        use lcms2::{PixelFormat as Fmt, Transform};
-
-        let Ok(t) = Transform::<[u8; 3], [u8; 3], _>::new_context(
-            ctx,
-            src,
-            Fmt::RGB_8,
-            dst,
-            Fmt::RGB_8,
-            intent,
-        ) else {
-            return false;
-        };
-        let lattice = (0..=16u32).map(|i| (i * 16).min(255) as u8);
-        let mut probe: Vec<[u8; 3]> = Vec::with_capacity(17 * 17 * 17 + 4 * 256);
-        for r in lattice.clone() {
-            for g in lattice.clone() {
-                probe.extend(lattice.clone().map(|b| [r, g, b]));
-            }
-        }
-        for v in 0..=255u8 {
-            probe.extend([[v, v, v], [v, 0, 0], [0, v, 0], [0, 0, v]]);
-        }
-        let mut out = probe.clone();
-        t.transform_in_place(&mut out);
-        probe
-            .iter()
-            .zip(&out)
-            .all(|(a, b)| (0..3).all(|c| a[c].abs_diff(b[c]) <= 1))
-    }
-
-    /// [`crate::icc_is_srgb`]. Inside `catch_unwind` for the same reason [`apply`] is: the profile
-    /// comes from the file.
-    pub fn is_srgb(profile: &[u8]) -> bool {
-        use lcms2::{ColorSpaceSignature, Intent, Profile, ThreadContext};
-
-        std::panic::catch_unwind(|| {
-            let ctx = ThreadContext::new();
-            let Ok(src) = Profile::new_icc_context(&ctx, profile) else {
-                return false;
-            };
-            let dst = Profile::new_srgb_context(&ctx);
-            let intent = Intent::RelativeColorimetric;
-            match src.color_space() {
-                ColorSpaceSignature::RgbData => is_srgb_equivalent(&ctx, &src, &dst, intent),
-                ColorSpaceSignature::GrayData => grey_is_srgb(&ctx, &src, &dst, intent),
-                _ => false,
-            }
-        })
-        .unwrap_or(false)
-    }
-
-    /// Whether every 8-bit grey level of a greyscale profile converts to the same sRGB grey, within
-    /// one code.
-    fn grey_is_srgb(
-        ctx: &lcms2::ThreadContext,
-        src: &lcms2::Profile<lcms2::ThreadContext>,
-        dst: &lcms2::Profile<lcms2::ThreadContext>,
-        intent: lcms2::Intent,
-    ) -> bool {
-        use lcms2::{PixelFormat as Fmt, Transform};
-
-        let Ok(t) = Transform::<u8, [u8; 3], _>::new_context(
-            ctx,
-            src,
-            Fmt::GRAY_8,
-            dst,
-            Fmt::RGB_8,
-            intent,
-        ) else {
-            return false;
-        };
-        let ramp: Vec<u8> = (0..=255).collect();
-        let mut out = vec![[0u8; 3]; ramp.len()];
-        t.transform_pixels(&ramp, &mut out);
-        ramp.iter()
-            .zip(&out)
-            .all(|(&v, rgb)| rgb.iter().all(|&c| c.abs_diff(v) <= 1))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn img8(pixels: Vec<u8>) -> DecodedImage {
-            let n = (pixels.len() / 4) as u32;
-            DecodedImage {
-                pixels,
-                width: n,
-                height: 1,
-                format: PixelFormat::Rgba8Unorm,
-                bit_depth: 8,
-                channels: 4,
-                palette: false,
-                icc: None,
-                source_format: "test",
-                alpha_opaque: false,
-                downscaled_from: None,
-                source_mips: None,
-                layout: None,
-                animation: None,
-            }
-        }
-
-        #[test]
-        fn no_icc_is_noop() {
-            let mut img = img8(vec![10, 20, 30, 40, 200, 150, 100, 255]);
-            let before = img.pixels.clone();
-            apply(&mut img);
-            assert_eq!(img.pixels, before);
-        }
-
-        #[test]
-        fn srgb_profile_near_identity_and_preserves_alpha() {
-            let icc = lcms2::Profile::new_srgb().icc().unwrap();
-            let mut img = img8(vec![10, 20, 30, 40, 200, 150, 100, 255, 0, 128, 255, 77]);
-            img.icc = Some(icc);
-            let before = img.pixels.clone();
-            apply(&mut img);
-            // sRGB -> sRGB is (near) identity; allow tiny rounding on the color channels.
-            for (i, (a, b)) in img.pixels.iter().zip(&before).enumerate() {
-                assert!(
-                    (*a as i32 - *b as i32).abs() <= 2,
-                    "channel {i} drifted: {a} vs {b}"
-                );
-            }
-            // COPY_ALPHA: alpha bytes (every 4th) preserved exactly.
-            assert_eq!(
-                [img.pixels[3], img.pixels[7], img.pixels[11]],
-                [40, 255, 77]
-            );
-        }
-
-        #[test]
-        fn malformed_profile_is_safe_noop() {
-            let mut img = img8(vec![10, 20, 30, 40]);
-            img.icc = Some(vec![0, 1, 2, 3, 4, 5]); // not a valid ICC profile
-            let before = img.pixels.clone();
-            apply(&mut img); // must not panic
-            assert_eq!(img.pixels, before);
-        }
-
-        /// sRGB primaries with `trc` on all three channels — the shape of every matrix-shaper
-        /// profile these tests need.
-        fn srgb_primaries_with(trc: &lcms2::ToneCurve) -> Vec<u8> {
-            use lcms2::{CIExyY, CIExyYTRIPLE, Profile};
-            let xy = |x, y| CIExyY { x, y, Y: 1.0 };
-            let primaries = CIExyYTRIPLE {
-                Red: xy(0.640, 0.330),
-                Green: xy(0.300, 0.600),
-                Blue: xy(0.150, 0.060),
-            };
-            Profile::new_rgb(&xy(0.3127, 0.3290), &primaries, &[trc, trc, trc])
-                .unwrap()
-                .icc()
-                .unwrap()
-        }
-
-        /// A profile that *is* sRGB but samples its tone curve into a table (as the sRGB profile
-        /// Windows ships does) lands within one code of identity, so it is not run at all: the
-        /// pixels come back exactly as decoded.
-        #[test]
-        fn tabulated_srgb_profile_is_skipped() {
-            let srgb = |c: f32| {
-                if c <= 0.04045 {
-                    c / 12.92
-                } else {
-                    ((c + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            let table: Vec<u16> = (0..1024)
-                .map(|i| (srgb(i as f32 / 1023.0) * 65535.0).round() as u16)
-                .collect();
-            let icc = srgb_primaries_with(&lcms2::ToneCurve::new_tabulated(&table));
-            let pixels: Vec<u8> = (0..=255u8).flat_map(|v| [v, 255 - v, v / 2, 200]).collect();
-            let mut img = img8(pixels.clone());
-            img.icc = Some(icc);
-            apply(&mut img);
-            assert_eq!(img.pixels, pixels);
-        }
-
-        /// The transform runs on several threads for a large image; the result must be exactly
-        /// what one lcms call over the whole buffer produces.
-        #[test]
-        fn threaded_transform_matches_a_single_pass() {
-            use lcms2::{Flags, Intent, PixelFormat as Fmt, Profile, Transform};
-
-            let icc = srgb_primaries_with(&lcms2::ToneCurve::new(1.0)); // linear: far from sRGB
-            // 2 MiB: comfortably past the threshold where the work is split.
-            let pixels: Vec<u8> = (0..512 * 1024u32)
-                .flat_map(|i| {
-                    [
-                        i as u8,
-                        (i >> 8) as u8,
-                        (i >> 16) as u8 ^ 0x5a,
-                        (i >> 3) as u8,
-                    ]
-                })
-                .collect();
-            let mut expected: Vec<[u8; 4]> = bytemuck::cast_slice(&pixels).to_vec();
-            let t: Transform<[u8; 4], [u8; 4]> = Transform::new_flags(
-                &Profile::new_icc(&icc).unwrap(),
-                Fmt::RGBA_8,
-                &Profile::new_srgb(),
-                Fmt::RGBA_8,
-                Intent::Perceptual,
-                Flags::COPY_ALPHA,
-            )
-            .unwrap();
-            t.transform_in_place(&mut expected);
-
-            let mut img = img8(pixels.clone());
-            img.icc = Some(icc);
-            apply(&mut img);
-            assert_ne!(
-                img.pixels, pixels,
-                "a linear profile must actually be applied"
-            );
-            assert_eq!(img.pixels, bytemuck::cast_slice::<[u8; 4], u8>(&expected));
-        }
-
-        /// Proves the embedded transfer curve is actually applied (not just channel
-        /// shuffling): a profile identical to sRGB except with a *linear* TRC means a
-        /// mid-gray 128 is linear-light 0.5, which sRGB-encodes to ~188. So the gray must
-        /// move substantially upward after the transform.
-        #[test]
-        fn linear_rgb_profile_applies_tone_curve() {
-            use lcms2::{CIExyY, CIExyYTRIPLE, Profile, ToneCurve};
-
-            let d65 = CIExyY {
-                x: 0.3127,
-                y: 0.3290,
-                Y: 1.0,
-            };
-            let primaries = CIExyYTRIPLE {
-                Red: CIExyY {
-                    x: 0.640,
-                    y: 0.330,
-                    Y: 1.0,
-                },
-                Green: CIExyY {
-                    x: 0.300,
-                    y: 0.600,
-                    Y: 1.0,
-                },
-                Blue: CIExyY {
-                    x: 0.150,
-                    y: 0.060,
-                    Y: 1.0,
-                },
-            };
-            let linear = ToneCurve::new(1.0);
-            let profile = Profile::new_rgb(&d65, &primaries, &[&linear, &linear, &linear]).unwrap();
-            let icc = profile.icc().unwrap();
-
-            let mut img = img8(vec![128, 128, 128, 200]);
-            img.icc = Some(icc);
-            apply(&mut img);
-
-            // Linear 0.5 -> sRGB ~= 188. Allow a generous window; the point is "much higher".
-            assert!(
-                img.pixels[0] >= 175 && img.pixels[0] <= 200,
-                "linear 128 should sRGB-encode to ~188, got {}",
-                img.pixels[0]
-            );
-            // Stays neutral gray and alpha is untouched.
-            assert_eq!(img.pixels[0], img.pixels[1]);
-            assert_eq!(img.pixels[1], img.pixels[2]);
-            assert_eq!(img.pixels[3], 200);
-        }
-
-        /// The sRGB transfer curve as an ICC parametric curve (type 4).
-        fn srgb_trc() -> lcms2::ToneCurve {
-            lcms2::ToneCurve::new_parametric(
-                4,
-                &[2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045],
-            )
-            .unwrap()
-        }
-
-        /// An RGB profile with D65 white and the given primaries and tone curve.
-        fn rgb_profile([r, g, b]: [(f64, f64); 3], trc: &lcms2::ToneCurve) -> Vec<u8> {
-            use lcms2::{CIExyY, CIExyYTRIPLE, Profile};
-            let xy = |(x, y): (f64, f64)| CIExyY { x, y, Y: 1.0 };
-            let primaries = CIExyYTRIPLE {
-                Red: xy(r),
-                Green: xy(g),
-                Blue: xy(b),
-            };
-            Profile::new_rgb(&xy((0.3127, 0.3290)), &primaries, &[trc, trc, trc])
-                .unwrap()
-                .icc()
-                .unwrap()
-        }
-
-        #[test]
-        fn srgb_profiles_are_srgb() {
-            assert!(crate::icc_is_srgb(
-                &lcms2::Profile::new_srgb().icc().unwrap()
-            ));
-            let srgb = [(0.640, 0.330), (0.300, 0.600), (0.150, 0.060)];
-            assert!(crate::icc_is_srgb(&rgb_profile(srgb, &srgb_trc())));
-        }
-
-        /// Display P3 shares sRGB's tone curve and differs only in its primaries, so this is the
-        /// case the colour probe exists for. Adobe RGB differs in both.
-        #[test]
-        fn wide_gamut_profiles_are_not_srgb() {
-            let p3 = [(0.680, 0.320), (0.265, 0.690), (0.150, 0.060)];
-            assert!(!crate::icc_is_srgb(&rgb_profile(p3, &srgb_trc())));
-            let adobe = [(0.640, 0.330), (0.210, 0.710), (0.150, 0.060)];
-            let gamma = lcms2::ToneCurve::new(563.0 / 256.0);
-            assert!(!crate::icc_is_srgb(&rgb_profile(adobe, &gamma)));
-        }
-
-        /// A greyscale profile is sRGB when its curve is sRGB's; a plain gamma 2.2 is not, and
-        /// neither is a colour space we have no probe for.
-        #[test]
-        fn grey_and_other_profiles() {
-            use lcms2::{CIExyY, Profile, ToneCurve};
-            let d65 = CIExyY {
-                x: 0.3127,
-                y: 0.3290,
-                Y: 1.0,
-            };
-            let grey = |trc: &ToneCurve| Profile::new_gray(&d65, trc).unwrap().icc().unwrap();
-            assert!(crate::icc_is_srgb(&grey(&srgb_trc())));
-            assert!(!crate::icc_is_srgb(&grey(&ToneCurve::new(2.2))));
-            assert!(!crate::icc_is_srgb(&Profile::new_xyz().icc().unwrap()));
-            assert!(!crate::icc_is_srgb(&[0, 1, 2, 3, 4, 5]));
-            assert!(!crate::icc_is_srgb(&[]));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The backend a whole in-memory file routes to.
+    fn route_of(bytes: &[u8], ext: Option<&str>) -> Backend {
+        route(bytes, bytes.len(), ext)
+    }
 
     /// Encode `img` to the given format with the `image` crate (test fixtures only).
     fn encode(img: &image::DynamicImage, fmt: image::ImageFormat) -> Vec<u8> {
@@ -2745,11 +2396,11 @@ mod tests {
             image::ImageFormat::Png,
         );
 
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
         assert_eq!((out.width, out.height), (2, 2));
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-        assert_eq!(out.source_format, "PNG");
-        assert_eq!(out.channels, 4);
+        assert_eq!(out.source.name, "PNG");
+        assert_eq!(out.source.channels, 4);
         assert_eq!(
             out.pixels,
             vec![
@@ -2772,9 +2423,9 @@ mod tests {
             image::ImageFormat::Png,
         );
 
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
         assert_eq!(
-            out.channels, 4,
+            out.source.channels, 4,
             "an all-opaque RGBA PNG still reports its true RGBA format"
         );
         assert!(
@@ -2792,8 +2443,8 @@ mod tests {
             &image::DynamicImage::ImageRgba8(src),
             image::ImageFormat::Png,
         );
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
-        assert_eq!(out.channels, 4);
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(out.source.channels, 4);
         assert!(
             !out.alpha_opaque,
             "a single non-opaque sample is real transparency"
@@ -2810,10 +2461,10 @@ mod tests {
             image::ImageFormat::Png,
         );
 
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
         assert_eq!(out.format, PixelFormat::Rgba16Unorm);
         assert_eq!(
-            out.channels, 4,
+            out.source.channels, 4,
             "an all-opaque 16-bit RGBA PNG still reports RGBA"
         );
         assert!(out.alpha_opaque, "all-opaque 16-bit alpha => flagged");
@@ -2831,10 +2482,10 @@ mod tests {
             image::ImageFormat::Png,
         );
 
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-        assert_eq!(out.channels, 1);
+        assert_eq!(out.source.channels, 1);
         assert_eq!(out.pixels, vec![40, 40, 40, 255, 200, 200, 200, 255]);
     }
 
@@ -2848,9 +2499,9 @@ mod tests {
             image::ImageFormat::Png,
         );
 
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
         assert_eq!(out.format, PixelFormat::Rgba16Unorm);
-        assert_eq!(out.bit_depth, 16);
+        assert_eq!(out.source.bit_depth, 16);
         // Native-endian u16 RGBA.
         let px: Vec<u16> = out
             .pixels
@@ -2909,9 +2560,9 @@ mod tests {
         let plte = [255, 0, 0, 0, 255, 0, 0, 0, 255];
         let bytes = raw_png((3, 1), 4, 3, &plte, &[], &[&[0x01, 0x20]]);
 
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
-        assert_eq!((out.bit_depth, out.palette), (4, true));
-        assert_eq!(out.channels, 3);
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!((out.source.bit_depth, out.source.palette), (4, true));
+        assert_eq!(out.source.channels, 3);
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
         assert_eq!(
             out.pixels,
@@ -2925,9 +2576,9 @@ mod tests {
         let plte = [10, 20, 30, 40, 50, 60];
         let bytes = raw_png((2, 1), 8, 3, &plte, &[128], &[&[0, 1]]);
 
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
-        assert_eq!((out.bit_depth, out.palette), (8, true));
-        assert_eq!(out.channels, 4);
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!((out.source.bit_depth, out.source.palette), (8, true));
+        assert_eq!(out.source.channels, 4);
         assert_eq!(out.pixels, vec![10, 20, 30, 128, 40, 50, 60, 255]);
         assert!(!out.alpha_opaque);
     }
@@ -2936,14 +2587,21 @@ mod tests {
     #[test]
     fn low_depth_grey_png_reports_its_depth() {
         let one = raw_png((4, 1), 1, 0, &[], &[], &[&[0b1010_0000]]);
-        let out = decode(&one, Some("png"), &DecodeOptions::default()).unwrap();
-        assert_eq!((out.bit_depth, out.palette, out.channels), (1, false, 1));
+        let out = decode(&one, Some("png"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(
+            (
+                out.source.bit_depth,
+                out.source.palette,
+                out.source.channels
+            ),
+            (1, false, 1)
+        );
         let grey: Vec<u8> = out.pixels.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
         assert_eq!(grey, vec![255, 0, 255, 0]);
 
         let two = raw_png((4, 1), 2, 0, &[], &[], &[&[0b00_01_10_11]]);
-        let out = decode(&two, Some("png"), &DecodeOptions::default()).unwrap();
-        assert_eq!((out.bit_depth, out.palette), (2, false));
+        let out = decode(&two, Some("png"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!((out.source.bit_depth, out.source.palette), (2, false));
         let grey: Vec<u8> = out.pixels.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
         assert_eq!(grey, vec![0, 85, 170, 255]);
     }
@@ -2952,13 +2610,21 @@ mod tests {
     #[test]
     fn truecolour_png_is_not_a_palette() {
         let bytes = raw_png((1, 1), 8, 2, &[], &[], &[&[1, 2, 3]]);
-        let out = decode(&bytes, Some("png"), &DecodeOptions::default()).unwrap();
-        assert_eq!((out.bit_depth, out.palette, out.channels), (8, false, 3));
+        let out = decode(&bytes, Some("png"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(
+            (
+                out.source.bit_depth,
+                out.source.palette,
+                out.source.channels
+            ),
+            (8, false, 3)
+        );
         assert_eq!(out.pixels, vec![1, 2, 3, 255]);
     }
 
     /// A PNG's embedded ICC profile is surfaced by the `image`-crate PNG path (zune-png
     /// surfaced it via its metadata chunk; the routing change must not lose it).
+    #[cfg(feature = "icc")] // lcms2 makes the profile
     #[test]
     fn png_icc_profile_is_surfaced() {
         use image::ImageEncoder;
@@ -2973,11 +2639,12 @@ mod tests {
 
         // honor_icc=false so the raw profile bytes survive for the assertion.
         let opts = DecodeOptions {
+            #[cfg(feature = "icc")]
             honor_icc: false,
-            ..Default::default()
+            ..DecodeOptions::viewer()
         };
         let out = decode(&buf, Some("png"), &opts).unwrap();
-        assert_eq!(out.source_format, "PNG");
+        assert_eq!(out.source.name, "PNG");
         assert_eq!(
             out.icc.as_deref(),
             Some(icc.as_slice()),
@@ -2996,11 +2663,11 @@ mod tests {
         ));
         let bytes = encode(&src, image::ImageFormat::Jpeg);
 
-        let out = decode(&bytes, Some("jpg"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("jpg"), &DecodeOptions::viewer()).unwrap();
         assert_eq!((out.width, out.height), (16, 16));
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-        assert_eq!(out.source_format, "JPEG");
-        assert_eq!(out.channels, 3);
+        assert_eq!(out.source.name, "JPEG");
+        assert_eq!(out.source.channels, 3);
         let [r, g, b, a] = [out.pixels[0], out.pixels[1], out.pixels[2], out.pixels[3]];
         assert!(r > 200 && g < 70 && b < 80, "got {r},{g},{b}");
         assert_eq!(a, 255);
@@ -3020,10 +2687,10 @@ mod tests {
             image::ImageFormat::Ico,
         );
 
-        let out = decode(&bytes, Some("ico"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("ico"), &DecodeOptions::viewer()).unwrap();
         assert_eq!((out.width, out.height), (4, 4));
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-        assert_eq!(out.source_format, "ICO");
+        assert_eq!(out.source.name, "ICO");
         assert_eq!(
             [out.pixels[0], out.pixels[1], out.pixels[2], out.pixels[3]],
             [200, 30, 40, 255]
@@ -3049,10 +2716,10 @@ mod tests {
         bytes[2] = 2;
         bytes[3] = 0;
 
-        assert!(matches!(sniff(&bytes, None), Backend::Cur));
-        let out = decode(&bytes, Some("cur"), &DecodeOptions::default()).unwrap();
+        assert!(matches!(route_of(&bytes, None), Backend::Cur));
+        let out = decode(&bytes, Some("cur"), &DecodeOptions::viewer()).unwrap();
         assert_eq!((out.width, out.height), (4, 4));
-        assert_eq!(out.source_format, "CUR");
+        assert_eq!(out.source.name, "CUR");
         assert_eq!(
             [out.pixels[0], out.pixels[1], out.pixels[2], out.pixels[3]],
             [200, 30, 40, 255]
@@ -3067,10 +2734,10 @@ mod tests {
             b"P7\nWIDTH 2\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n".to_vec();
         bytes.extend_from_slice(&[200, 30, 40, 10, 20, 30]);
 
-        let out = decode(&bytes, Some("pam"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("pam"), &DecodeOptions::viewer()).unwrap();
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-        assert_eq!(out.channels, 3);
+        assert_eq!(out.source.channels, 3);
         assert_eq!(out.pixels[..8], [200, 30, 40, 255, 10, 20, 30, 255]);
     }
 
@@ -3082,16 +2749,19 @@ mod tests {
             assert!(is_supported_extension(ext), ".{ext} is listed");
         }
         let bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n\x80\x80\x80\x81".to_vec();
-        assert!(matches!(sniff(&bytes, Some("pic")), Backend::Hdr));
+        assert!(matches!(route_of(&bytes, Some("pic")), Backend::Hdr));
     }
 
     /// DDS is sniffed by its own magic ahead of every fallback, and `.tx` (an OpenImageIO tiled
     /// TIFF) still reaches the TIFF backend by TIFF's magic.
     #[test]
     fn dds_and_tx_route_to_the_right_backends() {
-        assert!(matches!(sniff(b"DDS \x7c\x00\x00\x00", None), Backend::Dds));
         assert!(matches!(
-            sniff(b"II\x2a\x00rest", Some("tx")),
+            route_of(b"DDS \x7c\x00\x00\x00", None),
+            Backend::Dds
+        ));
+        assert!(matches!(
+            route_of(b"II\x2a\x00rest", Some("tx")),
             Backend::Tiff
         ));
         for ext in ["dds", "cur", "pam", "tx"] {
@@ -3137,14 +2807,27 @@ mod tests {
         tiff.extend_from_slice(&0u32.to_le_bytes());
         tiff.extend_from_slice(&preview);
 
-        let out = decode(&tiff, Some("nef"), &DecodeOptions::default()).unwrap();
-        assert_eq!(out.source_format, "Nikon NEF");
+        let result = decode(&tiff, Some("nef"), &DecodeOptions::viewer());
+        if !cfg!(feature = "raw") {
+            // Routed as raw all the same, and refused: the bytes are a raw, not a TIFF.
+            assert!(matches!(
+                result,
+                Err(DecodeError::Unsupported(Format::CameraRaw))
+            ));
+            return;
+        }
+        let out = result.unwrap();
+        assert_eq!(out.source.name, "Nikon NEF");
+        assert_eq!(out.source.format, Format::CameraRaw);
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
         // Orientation 8 swaps the 6x2 preview to 2x6.
         assert_eq!((out.width, out.height), (2, 6));
         // The camera's red is preserved through the JPEG round-trip.
         let [r, g, b] = [out.pixels[0], out.pixels[1], out.pixels[2]];
         assert!(r > 180 && g < 90 && b < 100, "got {r},{g},{b}");
+        // With EXIF orientation off, the preview stays as stored.
+        let stored = decode(&tiff, Some("nef"), &DecodeOptions::inspect()).unwrap();
+        assert_eq!((stored.width, stored.height), (6, 2));
     }
 
     /// The end-to-end EXIF-orientation path for an ordinary photo: a JPEG whose `APP1` says
@@ -3185,12 +2868,15 @@ mod tests {
         bytes.extend_from_slice(&plain[2..]);
 
         // Untagged, the JPEG is 16x8 with red on the left.
-        let plain_out = decode(&plain, Some("jpg"), &DecodeOptions::default()).unwrap();
+        let plain_out = decode(&plain, Some("jpg"), &DecodeOptions::viewer()).unwrap();
         assert_eq!((plain_out.width, plain_out.height), (16, 8));
 
-        let out = decode(&bytes, Some("jpg"), &DecodeOptions::default()).unwrap();
-        assert_eq!(out.source_format, "JPEG");
-        assert_eq!(out.channels, 3, "rotating must not invent an alpha channel");
+        let out = decode(&bytes, Some("jpg"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(out.source.name, "JPEG");
+        assert_eq!(
+            out.source.channels, 3,
+            "rotating must not invent an alpha channel"
+        );
         assert_eq!(
             (out.width, out.height),
             (8, 16),
@@ -3227,11 +2913,11 @@ mod tests {
                 image::Rgb([200, 30, 40]),
             ));
             let bytes = encode(&src, image::ImageFormat::Bmp);
-            let out = decode(&bytes, Some("bmp"), &DecodeOptions::default())
+            let out = decode(&bytes, Some("bmp"), &DecodeOptions::viewer())
                 .unwrap_or_else(|e| panic!("{w}x{h} BMP must open: {e}"));
             assert_eq!((out.width, out.height), (w, h));
             assert_eq!(&out.pixels[0..4], &[200, 30, 40, 255], "{w}x{h}");
-            assert_eq!(out.channels, 3);
+            assert_eq!(out.source.channels, 3);
         }
     }
 
@@ -3241,7 +2927,7 @@ mod tests {
         // A BMP header zune sniffs, followed by nothing either decoder can use.
         let mut junk = b"BM".to_vec();
         junk.extend_from_slice(&[0u8; 40]);
-        assert!(decode(&junk, Some("bmp"), &DecodeOptions::default()).is_err());
+        assert!(decode(&junk, Some("bmp"), &DecodeOptions::viewer()).is_err());
     }
 
     /// The fallback must never be a way around a decode guard.
@@ -3265,7 +2951,7 @@ mod tests {
         jpg[sof + 5..sof + 7].copy_from_slice(&u16::MAX.to_be_bytes()); // height
         jpg[sof + 7..sof + 9].copy_from_slice(&u16::MAX.to_be_bytes()); // width
 
-        let err = decode(&jpg, Some("jpg"), &DecodeOptions::default())
+        let err = decode(&jpg, Some("jpg"), &DecodeOptions::viewer())
             .expect_err("a decode bomb must be refused");
         assert!(
             matches!(err, DecodeError::TooLarge(_)),
@@ -3302,7 +2988,14 @@ mod tests {
             ),
         ] {
             let bpp = opaque.len();
-            let mut img = still(opaque.repeat(n), (n, 1), format, 4, None, "test");
+            let mut img = still(
+                opaque.repeat(n),
+                (n, 1),
+                format,
+                4,
+                None,
+                (Format::Unknown, "test"),
+            );
             assert!(alpha_is_opaque(&img), "{format:?} all opaque");
             let block = 64 * 1024 / bpp;
             let part = (n * bpp).div_ceil(8).div_ceil(64 * 1024) * block;
@@ -3365,9 +3058,9 @@ mod tests {
             } else {
                 rgba_bytes(&buf, 3, u8::MAX)
             };
-            let out = decode(bytes, Some("webp"), &DecodeOptions::default()).unwrap();
+            let out = decode(bytes, Some("webp"), &DecodeOptions::viewer()).unwrap();
             assert_eq!(
-                (out.width, out.height, out.channels, out.source_format),
+                (out.width, out.height, out.source.channels, out.source.name),
                 (7, 5, channels, "WebP"),
                 "{name}"
             );
@@ -3392,9 +3085,12 @@ mod tests {
             .collect();
         for (src, channels) in [(&rgba, 4u8), (&rgb, 3)] {
             let bytes = qoi::encode_to_vec(src, w, h).unwrap();
-            let out = decode(&bytes, Some("qoi"), &DecodeOptions::default()).unwrap();
-            assert_eq!((out.width, out.height, out.channels), (w, h, channels));
-            assert_eq!(out.source_format, "QOI");
+            let out = decode(&bytes, Some("qoi"), &DecodeOptions::viewer()).unwrap();
+            assert_eq!(
+                (out.width, out.height, out.source.channels),
+                (w, h, channels)
+            );
+            assert_eq!(out.source.name, "QOI");
             let expected = if channels == 4 {
                 rgba.clone()
             } else {
@@ -3415,18 +3111,18 @@ mod tests {
         for s in samples {
             bytes.extend_from_slice(&s.to_be_bytes());
         }
-        let out = decode(&bytes, Some("ff"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("ff"), &DecodeOptions::viewer()).unwrap();
         assert_eq!(
             (out.width, out.height, out.format),
             (2, 1, PixelFormat::Rgba16Unorm)
         );
-        assert_eq!(out.source_format, "Farbfeld");
+        assert_eq!(out.source.name, "Farbfeld");
         assert_eq!(out.pixels, to_ne_bytes(&samples));
         assert!(
             decode(
                 &bytes[..bytes.len() - 1],
                 Some("ff"),
-                &DecodeOptions::default()
+                &DecodeOptions::viewer()
             )
             .is_err()
         );
@@ -3479,10 +3175,13 @@ mod tests {
         let out = decode(
             &raw_psd(w, h, 4, 8, 3, &planes.concat()),
             Some("psd"),
-            &DecodeOptions::default(),
+            &DecodeOptions::viewer(),
         )
         .unwrap();
-        assert_eq!((out.format, out.channels), (PixelFormat::Rgba8Unorm, 4));
+        assert_eq!(
+            (out.format, out.source.channels),
+            (PixelFormat::Rgba8Unorm, 4)
+        );
         let expected: Vec<u8> = (0..n)
             .flat_map(|i| planes.iter().map(move |p| p[i] as u8))
             .collect();
@@ -3493,10 +3192,13 @@ mod tests {
         let out = decode(
             &raw_psd(w, h, 3, 16, 3, &planes.concat()),
             Some("psd"),
-            &DecodeOptions::default(),
+            &DecodeOptions::viewer(),
         )
         .unwrap();
-        assert_eq!((out.format, out.channels), (PixelFormat::Rgba16Unorm, 3));
+        assert_eq!(
+            (out.format, out.source.channels),
+            (PixelFormat::Rgba16Unorm, 3)
+        );
         let expected: Vec<u16> = (0..n)
             .flat_map(|i| [planes[0][i], planes[1][i], planes[2][i], 65535])
             .collect();
@@ -3507,7 +3209,7 @@ mod tests {
         let out = decode(
             &raw_psd(w, h, 2, 16, 1, &planes.concat()),
             Some("psd"),
-            &DecodeOptions::default(),
+            &DecodeOptions::viewer(),
         )
         .unwrap();
         let expected: Vec<u16> = (0..n)
@@ -3532,13 +3234,13 @@ mod tests {
         );
 
         // Without an extension hint the format is unidentifiable (the original bug).
-        assert!(decode(&bytes, None, &DecodeOptions::default()).is_err());
+        assert!(decode(&bytes, None, &DecodeOptions::viewer()).is_err());
 
         // With the hint it decodes — and the hint is matched case-insensitively (.TGA).
         for ext in ["tga", "TGA"] {
-            let out = decode(&bytes, Some(ext), &DecodeOptions::default()).unwrap();
+            let out = decode(&bytes, Some(ext), &DecodeOptions::viewer()).unwrap();
             assert_eq!((out.width, out.height), (2, 1));
-            assert_eq!(out.source_format, "TGA");
+            assert_eq!(out.source.name, "TGA");
             assert_eq!(&out.pixels[0..4], &[200, 30, 40, 255]);
         }
     }
@@ -3556,9 +3258,9 @@ mod tests {
             image::ImageFormat::Tga,
         );
 
-        let out = decode(&bytes, Some("tga"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("tga"), &DecodeOptions::viewer()).unwrap();
         assert_eq!(
-            out.channels, 3,
+            out.source.channels, 3,
             "24-bit RGB TGA must not report an alpha channel"
         );
         // Still normalized to RGBA pixels with opaque alpha for the GPU upload.
@@ -3571,9 +3273,9 @@ mod tests {
             &image::DynamicImage::ImageRgba8(rgba),
             image::ImageFormat::Tga,
         );
-        let out = decode(&bytes, Some("tga"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("tga"), &DecodeOptions::viewer()).unwrap();
         assert_eq!(
-            out.channels, 4,
+            out.source.channels, 4,
             "32-bit RGBA TGA must report an alpha channel"
         );
     }
@@ -3654,9 +3356,9 @@ mod tests {
     fn grey_tga_expands_to_opaque_rgba() {
         let mut bytes = vec![0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 8, 0x20];
         bytes.extend_from_slice(&[17, 230]);
-        let out = decode(&bytes, Some("tga"), &DecodeOptions::default()).unwrap();
-        assert_eq!(out.source_format, "TGA");
-        assert_eq!(out.channels, 1);
+        let out = decode(&bytes, Some("tga"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(out.source.name, "TGA");
+        assert_eq!(out.source.channels, 1);
         assert_eq!(out.pixels, [17, 17, 17, 255, 230, 230, 230, 255]);
     }
 
@@ -3700,18 +3402,18 @@ mod tests {
         );
 
         for ext in [Some("tga"), Some("TGA"), None] {
-            let out = decode(&bytes, ext, &DecodeOptions::default())
+            let out = decode(&bytes, ext, &DecodeOptions::viewer())
                 .unwrap_or_else(|e| panic!("ext {ext:?}: {e:?}"));
-            assert_eq!(out.source_format, "TGA");
+            assert_eq!(out.source.name, "TGA");
             assert_eq!((out.width, out.height), (2, 1));
-            assert_eq!(out.channels, 3);
+            assert_eq!(out.source.channels, 3);
             assert_eq!(&out.pixels[0..4], &[200, 30, 40, 255]);
         }
 
         // 32-bit, the other common uncompressed variant, collides identically.
         let bytes = raw_tga(1, 1, 32, &[3, 2, 1, 128]);
-        let out = decode(&bytes, Some("tga"), &DecodeOptions::default()).unwrap();
-        assert_eq!(out.source_format, "TGA");
+        let out = decode(&bytes, Some("tga"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(out.source.name, "TGA");
         assert_eq!(&out.pixels[0..4], &[1, 2, 3, 128]);
     }
 
@@ -3738,11 +3440,11 @@ mod tests {
     #[test]
     fn animated_gif_decodes_all_frames_with_delays() {
         let bytes = encode_gif(4, 4, &[([220, 30, 40, 255], 100), ([20, 60, 220, 255], 60)]);
-        let out = decode(&bytes, Some("gif"), &DecodeOptions::default()).unwrap();
-        assert_eq!(out.source_format, "GIF");
+        let out = decode(&bytes, Some("gif"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(out.source.name, "GIF");
         assert_eq!((out.width, out.height), (4, 4));
         assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-        assert_eq!(out.channels, 4);
+        assert_eq!(out.source.channels, 4);
 
         let anim = out
             .animation
@@ -3778,7 +3480,7 @@ mod tests {
     #[test]
     fn gif_zero_delay_clamped_to_100ms() {
         let bytes = encode_gif(2, 2, &[([1, 2, 3, 255], 0), ([9, 8, 7, 255], 0)]);
-        let out = decode(&bytes, Some("gif"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("gif"), &DecodeOptions::viewer()).unwrap();
         let anim = out.animation.as_ref().expect("animated");
         assert!(
             anim.frames.iter().all(|f| f.delay_ms == 100),
@@ -3790,8 +3492,8 @@ mod tests {
     #[test]
     fn single_frame_gif_is_still() {
         let bytes = encode_gif(2, 2, &[([10, 200, 60, 255], 100)]);
-        let out = decode(&bytes, Some("gif"), &DecodeOptions::default()).unwrap();
-        assert_eq!(out.source_format, "GIF");
+        let out = decode(&bytes, Some("gif"), &DecodeOptions::viewer()).unwrap();
+        assert_eq!(out.source.name, "GIF");
         assert_eq!((out.width, out.height), (2, 2));
         assert!(
             out.animation.is_none(),
@@ -3799,12 +3501,20 @@ mod tests {
         );
     }
 
+    /// FD7: a panic inside a decode comes back as an error, and the thread is fine afterwards.
+    #[test]
+    fn a_panic_is_an_error() {
+        let r: Result<(), DecodeError> = guarded(|| panic!("a decoder bug"));
+        assert!(matches!(r, Err(DecodeError::Panicked)));
+        assert!(guarded(|| Ok(1)).is_ok());
+    }
+
     /// Corrupt input must surface an error, never panic (FFI-free path, but the viewer
     /// relies on this being a clean `Err`).
     #[test]
     fn garbage_input_errors() {
         let bytes = b"\x89PNG\r\n\x1a\n garbage that is not a real png body";
-        let r = decode(bytes, Some("png"), &DecodeOptions::default());
+        let r = decode(bytes, Some("png"), &DecodeOptions::viewer());
         assert!(r.is_err());
     }
 
@@ -3817,8 +3527,8 @@ mod tests {
     fn raw_extensions_are_all_listed() {
         for (ext, label) in raw::EXT_LABELS {
             assert!(
-                SUPPORTED_EXTENSIONS.contains(ext),
-                "raw.rs routes .{ext} ({label}) but SUPPORTED_EXTENSIONS omits it"
+                all_extensions().contains(ext),
+                "raw.rs routes .{ext} ({label}) but all_extensions() omits it"
             );
         }
     }
@@ -3827,7 +3537,7 @@ mod tests {
     #[test]
     fn extension_table_has_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
-        for ext in SUPPORTED_EXTENSIONS {
+        for ext in all_extensions() {
             assert!(seen.insert(*ext), ".{ext} is listed twice");
             assert_eq!(
                 *ext,
@@ -3855,7 +3565,7 @@ mod tests {
             image::ImageFormat::Png,
         );
         assert!(
-            matches!(sniff(&png, None), Backend::Png),
+            matches!(route_of(&png, None), Backend::Png),
             "PNG must reach decode_png, not the `image` fallback"
         );
 
@@ -3865,7 +3575,7 @@ mod tests {
             let mut hdr = format!("{magic}\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 1\n").into_bytes();
             hdr.extend_from_slice(&[128, 128, 128, 129]);
             assert!(
-                matches!(sniff(&hdr, None), Backend::Hdr),
+                matches!(route_of(&hdr, None), Backend::Hdr),
                 "Radiance HDR ({magic}) must reach decode_hdr, not the `image` fallback"
             );
         }
@@ -3875,7 +3585,7 @@ mod tests {
             &image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)),
             image::ImageFormat::Jpeg,
         );
-        assert!(matches!(sniff(&jpg, None), Backend::Zune(_)));
+        assert!(matches!(route_of(&jpg, None), Backend::Zune(_)));
     }
 
     // --- Decode-bomb guards -------------------------------------------------------------------
@@ -3907,17 +3617,26 @@ mod tests {
     }
 
     /// The product, not the axes, is what gets allocated: both of these pass a per-axis cap of
-    /// 131072 and still ask for far more than [`MAX_DECODE_BYTES`].
+    /// 131072 and still ask for far more than [`Limits::VIEWER.max_bytes`].
     #[test]
     fn check_dims_bounds_the_product_not_just_each_axis() {
         // Comfortably inside the per-axis cap; 65535² × 4 ≈ 17 GiB.
-        assert!(check_dims(65535, 65535, 4, "GIF").is_err());
+        assert!(check_dims(65535, 65535, 4, "GIF", &Limits::VIEWER).is_err());
         // A single oversized axis is still refused.
-        assert!(check_dims(MAX_DECODE_DIM + 1, 1, 4, "PNG").is_err());
+        assert!(
+            check_dims(
+                Limits::VIEWER.max_dim as usize + 1,
+                1,
+                4,
+                "PNG",
+                &Limits::VIEWER
+            )
+            .is_err()
+        );
         // Overflowing the multiply is a rejection, not a wrap.
-        assert!(check_dims(usize::MAX, usize::MAX, 16, "OpenEXR").is_err());
+        assert!(check_dims(usize::MAX, usize::MAX, 16, "OpenEXR", &Limits::VIEWER).is_err());
         // A large-but-real image still decodes: a 216-MP 16-bit scan is ~1.7 GiB.
-        assert!(check_dims(18000, 12000, 8, "PNG").is_ok());
+        assert!(check_dims(18000, 12000, 8, "PNG", &Limits::VIEWER).is_ok());
     }
 
     /// A 33-byte PNG whose IHDR claims 2³¹-ish pixels per side. The contract under test is
@@ -3939,7 +3658,7 @@ mod tests {
         bytes.extend_from_slice(&crc32(&ihdr).to_be_bytes());
 
         assert!(
-            decode(&bytes, Some("png"), &DecodeOptions::default()).is_err(),
+            decode(&bytes, Some("png"), &DecodeOptions::viewer()).is_err(),
             "a 2³¹×2³¹ IHDR must be refused, not allocated"
         );
     }
@@ -3949,7 +3668,7 @@ mod tests {
     #[test]
     fn hdr_decode_bomb_header_is_rejected() {
         let bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 99999 +X 99999\n";
-        let err = decode(bytes, Some("hdr"), &DecodeOptions::default())
+        let err = decode(bytes, Some("hdr"), &DecodeOptions::viewer())
             .expect_err("a 99999² Radiance header must be refused");
         assert!(err.to_string().contains("decode guard"), "{err}");
     }
@@ -3979,7 +3698,7 @@ mod tests {
         ]
         .concat();
 
-        let err = decode(&bytes, Some("gif"), &DecodeOptions::default())
+        let err = decode(&bytes, Some("gif"), &DecodeOptions::viewer())
             .expect_err("a 65535² GIF canvas must be refused");
         assert!(err.to_string().contains("decode guard"), "{err}");
     }
@@ -3993,7 +3712,7 @@ mod tests {
             .map(|i| ([(i * 2) as u8, 40, 200, 255], 40u32))
             .collect();
         let bytes = encode_gif(4, 4, &frames);
-        let out = decode(&bytes, Some("gif"), &DecodeOptions::default()).unwrap();
+        let out = decode(&bytes, Some("gif"), &DecodeOptions::viewer()).unwrap();
         let anim = out.animation.as_ref().expect("animated");
         assert_eq!(
             anim.frames.len(),
@@ -4002,7 +3721,8 @@ mod tests {
         );
 
         // The budget divides the byte cap by the canvas size, and is clamped to the frame ceiling.
-        let tiny_canvas_budget = (MAX_ANIMATION_BYTES / (4 * 4 * 4)).min(MAX_ANIMATION_FRAMES);
+        let tiny_canvas_budget =
+            ((MAX_ANIMATION_BYTES / (4 * 4 * 4)) as usize).min(MAX_ANIMATION_FRAMES);
         assert_eq!(tiny_canvas_budget, MAX_ANIMATION_FRAMES);
     }
 
@@ -4034,7 +3754,7 @@ mod tests {
             jpg.len()
         );
 
-        let err = decode(&jpg, Some("jpg"), &DecodeOptions::default())
+        let err = decode(&jpg, Some("jpg"), &DecodeOptions::viewer())
             .expect_err("a 65535x65535 JPEG must be refused before zune allocates");
         assert!(err.to_string().contains("decode guard"), "{err}");
     }
@@ -4051,7 +3771,7 @@ mod tests {
         bmp[18..22].copy_from_slice(&40_000i32.to_le_bytes());
         bmp[22..26].copy_from_slice(&40_000i32.to_le_bytes());
 
-        let err = decode(&bmp, Some("bmp"), &DecodeOptions::default())
+        let err = decode(&bmp, Some("bmp"), &DecodeOptions::viewer())
             .expect_err("a 40000x40000 BMP (6.4 GiB of RGBA) must be refused");
         assert!(err.to_string().contains("decode guard"), "{err}");
     }

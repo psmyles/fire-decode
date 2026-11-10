@@ -30,6 +30,10 @@
 //! All parsing is pure Rust and bounds-checked (reads return `Option`, never index past the
 //! buffer), so a malformed/truncated raw yields "no preview found", never a panic.
 
+// Recognising a raw (`label`) is always compiled, so routing does not change with the `raw`
+// feature; finding its preview is only reached with it.
+#![cfg_attr(not(feature = "raw"), allow(dead_code))]
+
 // The TIFF/EXIF directory primitives are shared with [`crate::exif`], which owns them: this
 // module walks the *whole* tree looking for previews, that one reads IFD0's Orientation for every
 // other container. Both parse the same 12-byte entries.
@@ -187,7 +191,7 @@ fn pick_largest(b: &[u8], cands: &[(usize, usize)]) -> Option<(usize, usize)> {
 
 /// Probe a JPEG's pixel dimensions from its Start-Of-Frame marker without decoding it.
 /// `b` must start at the SOI. Returns `(width, height)`.
-fn jpeg_dimensions(b: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn jpeg_dimensions(b: &[u8]) -> Option<(u32, u32)> {
     let mut i = 2; // skip the SOI (FF D8)
     while i + 4 <= b.len() {
         if b[i] != 0xFF {

@@ -41,7 +41,8 @@
 use ddsfile::{Dds, DxgiFormat, FourCC, PixelFormatFlags};
 
 use crate::{
-    DecodeError, DecodedImage, PixelFormat, SheetKind, SheetLayout, check_dims, level_dims,
+    Cx, DecodeError, DecodedImage, PixelFormat, SheetKind, SheetLayout, SourceInfo, Surfaces,
+    level_dims,
 };
 
 /// Half-precision 1.0, the alpha filled in for the alpha-less HDR formats.
@@ -412,7 +413,7 @@ fn describe(dds: &Dds) -> String {
 /// `+X -X +Y -Y +Z -Z` order), and within a layer mip level by mip level, largest first. Each
 /// level halves both axes, flooring but never going below 1 — the same rule the viewer's own mip
 /// builder uses, which is what will let the file's chain be adopted verbatim.
-struct Surfaces {
+struct Stored {
     levels: u32,
     layers: u32,
     /// Byte size of each mip level of one layer, level 0 first.
@@ -421,8 +422,8 @@ struct Surfaces {
     layer_stride: usize,
 }
 
-impl Surfaces {
-    fn new(dds: &Dds, fmt: &Format, data_len: usize) -> Result<Surfaces, DecodeError> {
+impl Stored {
+    fn new(dds: &Dds, fmt: &Format, data_len: usize) -> Result<Stored, DecodeError> {
         let (w, h) = (dds.header.width, dds.header.height);
         let depth = dds.get_depth().max(1);
         // A header may claim more levels than the dimensions can have, and a corrupt one may
@@ -461,7 +462,7 @@ impl Surfaces {
                  {w}x{h} header describes"
             )));
         }
-        Ok(Surfaces {
+        Ok(Stored {
             levels,
             layers,
             level_sizes,
@@ -484,10 +485,12 @@ impl Surfaces {
 
 /// Decode a DDS from memory, normalized to RGBA.
 ///
-/// A single-surface file decodes to its one surface. A cubemap, texture array or volume is
-/// composited into one sheet and described by a [`SheetLayout`], so the viewer's flipbook can step
-/// through the faces or slices with the transport it already has.
-pub fn decode(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+/// A single-surface file decodes to its one surface. A cubemap, texture array or volume is, with
+/// [`Surfaces::Sheet`], composited into one sheet and described by a [`SheetLayout`], so the
+/// viewer's flipbook can step through the faces or slices with the transport it already has; with
+/// [`Surfaces::First`] it decodes to its first surface alone. The file's own mips come back only
+/// when the setup keeps them (`stored_mips`), and are not decoded otherwise.
+pub fn decode(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     let dds = Dds::read(bytes).map_err(|e| DecodeError::Malformed(format!("DDS: {e}")))?;
     let fmt = identify(&dds).ok_or_else(|| {
         DecodeError::Malformed(format!("unsupported DDS format: {}", describe(&dds)))
@@ -504,7 +507,7 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     // anything else from it. Order matters beyond tidiness: a decode bomb has to come back as
     // `TooLarge` — "we refused this" — and not as the `Malformed` that a walk over its absurd
     // (and therefore truncated) surface data would produce first.
-    check_dims(
+    cx.check_dims(
         width as usize,
         height as usize,
         fmt.out.bytes_per_pixel(),
@@ -515,9 +518,10 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     // too — from the grid the *header* asks for, before the payload is consulted at all. A guard
     // that only fired once the data was known to be present would be no guard: the interesting
     // case is a header claiming far more than the file could ever hold.
-    let declared = layout_for(&dds, dds.get_num_array_layers().max(1));
+    let sheet = cx.opts.surfaces == Surfaces::Sheet;
+    let declared = layout_for(&dds, dds.get_num_array_layers().max(1)).filter(|_| sheet);
     if let Some(l) = declared {
-        check_dims(
+        cx.check_dims(
             width.checked_mul(l.cols).ok_or_else(too_large)? as usize,
             height.checked_mul(l.rows).ok_or_else(too_large)? as usize,
             fmt.out.bytes_per_pixel(),
@@ -525,31 +529,36 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         )?;
     }
 
-    let surfaces = Surfaces::new(&dds, &fmt, dds.data.len())?;
-    // The layout the data actually backs, which is what gets tiled. `Surfaces` has already
+    let surfaces = Stored::new(&dds, &fmt, dds.data.len())?;
+    // The layout the data actually backs, which is what gets tiled. `Stored` has already
     // clamped the layer count to the bytes present, so a header claiming a hundred layers over a
     // six-layer file lays out six.
-    let layout = layout_for(&dds, surfaces.layers);
+    let all = layout_for(&dds, surfaces.layers);
+    let layout = all.filter(|_| sheet);
     let (cols, rows) = layout.map_or((1, 1), |l| (l.cols, l.rows));
     let (out_w, out_h) = (
         width.checked_mul(cols).ok_or_else(too_large)?,
         height.checked_mul(rows).ok_or_else(too_large)?,
     );
 
-    let mut pixels = match layout {
+    let truncated = || DecodeError::Malformed("DDS surface data is truncated".into());
+    let mut pixels = match (layout, all) {
+        // A sheet of every surface.
+        (Some(l), _) => composite_level(&fmt, &dds, &surfaces, 0, l).ok_or_else(truncated)?,
+        // The first surface of several (`Surfaces::First`): a volume's first slice, or layer 0.
+        (None, Some(l)) => {
+            let src = surface_bytes(&dds, &surfaces, 0, 0, l, &fmt, width, height)
+                .ok_or_else(truncated)?;
+            decode_surface(&fmt, src, width, height)
+        }
         // The common case: one surface, decoded straight into the canvas with no tiling copy.
-        None => {
+        (None, None) => {
             let range = surfaces
                 .range(0, 0)
                 .ok_or_else(|| DecodeError::Malformed("DDS has no surfaces".into()))?;
-            let src = dds
-                .data
-                .get(range)
-                .ok_or_else(|| DecodeError::Malformed("DDS surface data is truncated".into()))?;
+            let src = dds.data.get(range).ok_or_else(truncated)?;
             decode_surface(&fmt, src, width, height)
         }
-        Some(l) => composite_level(&fmt, &dds, &surfaces, 0, l)
-            .ok_or_else(|| DecodeError::Malformed("DDS surface data is truncated".into()))?,
     };
 
     // The file's own chain, levels 1.. — authored, often with a better filter than a box, and
@@ -558,7 +567,10 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     // rather than failing the decode: half an authored chain is still better than none, and the
     // worker pads whatever is short.
     let mut source_mips = Vec::new();
-    for level in 1..surfaces.levels {
+    // A volume's levels are volumes, so its first slice has no chain of its own to keep.
+    let keep_mips = cx.opts.stored_mips
+        && !(layout.is_none() && all.is_some_and(|l| l.kind == SheetKind::VolumeSlices));
+    for level in (1..surfaces.levels).filter(|_| keep_mips) {
         let next = match layout {
             None => {
                 let (lw, lh) = level_dims(width, height, level);
@@ -585,11 +597,8 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     Ok(DecodedImage {
         pixels,
         format: fmt.out,
-        bit_depth: fmt.bit_depth,
-        channels: fmt.channels,
-        palette: false,
+        source: SourceInfo::new(crate::Format::Dds, fmt.label, fmt.channels, fmt.bit_depth),
         icc: None,
-        source_format: fmt.label,
         alpha_opaque: false, // set by `decode` after the final buffer is built
         width: out_w,
         height: out_h,
@@ -598,6 +607,29 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         layout,
         animation: None,
     })
+}
+
+/// The size [`decode`] returns for a DDS with [`Surfaces::Sheet`], from the file's first bytes
+/// (`head`, its header at least) and its length: one surface, or the sheet the data backs (FD19).
+pub(crate) fn probe_dims(head: &[u8], len: usize) -> Result<(u32, u32), DecodeError> {
+    let dds = Dds::read(head).map_err(|e| DecodeError::Malformed(format!("DDS: {e}")))?;
+    let fmt = identify(&dds).ok_or_else(|| {
+        DecodeError::Malformed(format!("unsupported DDS format: {}", describe(&dds)))
+    })?;
+    let (width, height) = (dds.header.width, dds.header.height);
+    if width == 0 || height == 0 {
+        return Err(DecodeError::Malformed(format!(
+            "DDS declares a {width}x{height} surface"
+        )));
+    }
+    // The magic and the header, and the DX10 extension when there is one.
+    let header_len = 4 + 124 + if dds.header10.is_some() { 20 } else { 0 };
+    let stored = Stored::new(&dds, &fmt, len.saturating_sub(header_len))?;
+    let (cols, rows) = layout_for(&dds, stored.layers).map_or((1, 1), |l| (l.cols, l.rows));
+    Ok((
+        width.checked_mul(cols).ok_or_else(too_large)?,
+        height.checked_mul(rows).ok_or_else(too_large)?,
+    ))
 }
 
 /// The `TooLarge` a header's own arithmetic overflowing earns.
@@ -667,7 +699,7 @@ fn layout_grid(frames: u32) -> Option<(u32, u32)> {
 fn composite_level(
     fmt: &Format,
     dds: &Dds,
-    surfaces: &Surfaces,
+    surfaces: &Stored,
     level: u32,
     layout: SheetLayout,
 ) -> Option<Vec<u8>> {
@@ -706,7 +738,7 @@ fn composite_level(
 #[allow(clippy::too_many_arguments)]
 fn surface_bytes<'a>(
     dds: &'a Dds,
-    surfaces: &Surfaces,
+    surfaces: &Stored,
     level: u32,
     frame: u32,
     layout: SheetLayout,

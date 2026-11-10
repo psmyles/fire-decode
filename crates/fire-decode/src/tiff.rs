@@ -27,7 +27,7 @@ use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult, Limits};
 use tiff::tags::Tag;
 
-use crate::{DecodeError, DecodedImage, PixelFormat, check_dims};
+use crate::{Cx, DecodeError, DecodedImage, Format, PixelFormat, SourceInfo};
 
 /// `ExtraSamples` value 1 — the alpha is *associated*, i.e. the colour samples are already
 /// multiplied by it. Everything downstream (and the shader, which composites
@@ -36,8 +36,8 @@ const EXTRA_ASSOCIATED_ALPHA: u16 = 1;
 
 /// Decode a TIFF, or return `None` if its colour type is one the caller should hand to the
 /// `image` crate instead.
-pub(crate) fn decode(bytes: &[u8]) -> Option<Result<DecodedImage, DecodeError>> {
-    if let Some(palette) = decode_palette(bytes) {
+pub(crate) fn decode(bytes: &[u8], cx: &Cx) -> Option<Result<DecodedImage, DecodeError>> {
+    if let Some(palette) = decode_palette(bytes, cx) {
         return Some(palette);
     }
     // Limits::unlimited defers the size question to our own guard below, which is expressed in
@@ -74,7 +74,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Result<DecodedImage, DecodeError>> 
         8 | 16 | 32 => 4 * (bits as usize / 8),
         _ => return None,
     };
-    if let Err(e) = check_dims(width as usize, height as usize, out_bpp, "TIFF") {
+    if let Err(e) = cx.check_dims(width as usize, height as usize, out_bpp, "TIFF") {
         return Some(Err(e));
     }
 
@@ -93,7 +93,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Result<DecodedImage, DecodeError>> 
         // Fewer samples than the named colour type needs: malformed; let the image crate say so.
         return None;
     }
-    if let Err(e) = check_dims(
+    if let Err(e) = cx.check_dims(
         width as usize,
         height as usize,
         file_spp * (bits as usize / 8),
@@ -171,11 +171,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Result<DecodedImage, DecodeError>> 
         width,
         height,
         format,
-        bit_depth,
-        channels: src_channels,
-        palette: false,
+        source: SourceInfo::new(Format::Tiff, "TIFF", src_channels, bit_depth),
         icc,
-        source_format: "TIFF",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -433,7 +430,7 @@ fn ifd0_short(bytes: &[u8], tag: u16) -> Option<(usize, u16)> {
 /// its bytes — the same kind of one-field patch [`extra_sample_as_alpha`] makes — and read by the
 /// crate as such, with all of its decompression, predictor and strip/tile handling intact. The
 /// `ColorMap` tag is untouched by the relabelling and maps the indices to colour here.
-pub(crate) fn decode_palette(bytes: &[u8]) -> Option<Result<DecodedImage, DecodeError>> {
+pub(crate) fn decode_palette(bytes: &[u8], cx: &Cx) -> Option<Result<DecodedImage, DecodeError>> {
     const PHOTOMETRIC_INTERPRETATION: u16 = 262;
     const RGB_PALETTE: u16 = 3;
     const BLACK_IS_ZERO: u16 = 1;
@@ -449,10 +446,10 @@ pub(crate) fn decode_palette(bytes: &[u8]) -> Option<Result<DecodedImage, Decode
         BLACK_IS_ZERO.to_le_bytes()
     };
     patched[at..at + 2].copy_from_slice(&relabel);
-    Some(read_palette(&patched))
+    Some(read_palette(&patched, cx))
 }
 
-fn read_palette(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
+fn read_palette(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     let malformed = |what: &str| DecodeError::Malformed(format!("palette TIFF: {what}"));
     let err = |e: tiff::TiffError| DecodeError::Malformed(e.to_string());
 
@@ -468,7 +465,7 @@ fn read_palette(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
             ));
         }
     };
-    check_dims(width as usize, height as usize, 4, "TIFF")?;
+    cx.check_dims(width as usize, height as usize, 4, "TIFF")?;
     // The file-side buffers are laid out from SamplesPerPixel (see `decode`); a palette image
     // has one, and one is all the guard above accounts for.
     if dec
@@ -559,11 +556,8 @@ fn read_palette(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         width,
         height,
         format: PixelFormat::Rgba8Unorm,
-        bit_depth: 8,
-        channels: 3,
-        palette: false,
+        source: SourceInfo::new(Format::Tiff, "TIFF", 3, 8),
         icc,
-        source_format: "TIFF",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,
         source_mips: None,
@@ -739,7 +733,10 @@ mod tests {
             // 8-bit, 3x2.
             let idx = [0u8, 1, 255, 128, 7, 200];
             let out = run(&palette(3, 2, 8, &map16(256), &idx, big_endian));
-            assert_eq!((out.channels, out.format), (3, PixelFormat::Rgba8Unorm));
+            assert_eq!(
+                (out.source.channels, out.format),
+                (3, PixelFormat::Rgba8Unorm)
+            );
             let expected: Vec<u8> = idx.iter().flat_map(|&i| colour(i as usize)).collect();
             assert_eq!(out.pixels, expected, "8-bit, big-endian {big_endian}");
 
@@ -783,7 +780,7 @@ mod tests {
     const BLACK_IS_ZERO: u32 = 1;
 
     fn run(bytes: &[u8]) -> crate::DecodedImage {
-        decode(bytes, Some("tif"), &DecodeOptions::default()).expect("should decode")
+        decode(bytes, Some("tif"), &DecodeOptions::viewer()).expect("should decode")
     }
 
     /// Photoshop's "Alpha 1" — `ExtraSamples = 0`, *unspecified* — is read as alpha.
@@ -794,7 +791,7 @@ mod tests {
     #[test]
     fn unspecified_extra_sample_is_read_as_alpha() {
         let out = run(&build(1, 1, RGB, 4, 8, &[0], &[255, 255, 255, 128]));
-        assert_eq!(out.channels, 4);
+        assert_eq!(out.source.channels, 4);
         assert_eq!(out.pixels, vec![255, 255, 255, 128]);
 
         // A file that already says "unassociated alpha" needs no patch and decodes the same.
@@ -823,7 +820,7 @@ mod tests {
             &[10, 20, 30, 40, 99, 50, 60, 70, 80, 111],
         ));
         assert_eq!(
-            out.channels, 4,
+            out.source.channels, 4,
             "alpha is still seen through the spot channel"
         );
         assert_eq!(
@@ -842,7 +839,7 @@ mod tests {
             &[0, 0],
             &[10, 20, 30, 98, 99, 50, 60, 70, 110, 111],
         ));
-        assert_eq!(out.channels, 3, "no alpha among the extras");
+        assert_eq!(out.source.channels, 3, "no alpha among the extras");
         assert_eq!(out.pixels, vec![10, 20, 30, 255, 50, 60, 70, 255]);
     }
 
@@ -862,7 +859,10 @@ mod tests {
                 extra,
                 &[200, 128, 0, 255],
             ));
-            assert_eq!(out.channels, 2, "grey + alpha (ExtraSamples {extra:?})");
+            assert_eq!(
+                out.source.channels, 2,
+                "grey + alpha (ExtraSamples {extra:?})"
+            );
             assert_eq!(
                 out.pixels,
                 vec![200, 200, 200, 128, 0, 0, 0, 255],
@@ -895,7 +895,7 @@ mod tests {
         img.rows_per_strip(7).unwrap();
         img.write_data(&rgb).unwrap();
         let out = run(&file.into_inner());
-        assert_eq!((out.width, out.height, out.channels), (w, h, 3));
+        assert_eq!((out.width, out.height, out.source.channels), (w, h, 3));
         let expected: Vec<u8> = rgb
             .as_chunks::<3>()
             .0
@@ -923,7 +923,7 @@ mod tests {
         let le = |v: [u16; 4]| -> Vec<u8> { v.iter().flat_map(|s| s.to_le_bytes()).collect() };
         let out = run(&build(1, 1, RGB, 4, 16, &[2], &le([65535, 4660, 0, 32768])));
         assert_eq!(out.format, PixelFormat::Rgba16Unorm);
-        assert_eq!(out.bit_depth, 16);
+        assert_eq!(out.source.bit_depth, 16);
         let s: Vec<u16> = out
             .pixels
             .as_chunks::<2>()
@@ -948,7 +948,7 @@ mod tests {
             &4660u16.to_le_bytes(),
         ));
         assert_eq!(out.format, PixelFormat::Rgba16Unorm);
-        assert_eq!(out.channels, 1);
+        assert_eq!(out.source.channels, 1);
     }
 
     /// Associated (`ExtraSamples = 1`) alpha is premultiplied and must be straightened.
@@ -980,16 +980,20 @@ mod tests {
     fn unowned_color_types_fall_back_to_the_image_crate() {
         // CMYK (photometric 5): full cyan ink. `image` converts it; we must not swallow it.
         let out = run(&build(1, 1, 5, 4, 8, &[], &[255, 0, 0, 0]));
-        assert_eq!(out.source_format, "TIFF");
+        assert_eq!(out.source.name, "TIFF");
         assert_eq!(out.pixels[..3], [0, 255, 255], "cyan survives the fallback");
 
         // Plain RGB and plain grey stay on the native path and report honest channel counts.
         assert_eq!(
-            run(&build(2, 1, RGB, 3, 8, &[], &[255, 0, 0, 0, 255, 0])).channels,
+            run(&build(2, 1, RGB, 3, 8, &[], &[255, 0, 0, 0, 255, 0]))
+                .source
+                .channels,
             3
         );
         assert_eq!(
-            run(&build(2, 1, BLACK_IS_ZERO, 1, 8, &[], &[64, 192])).channels,
+            run(&build(2, 1, BLACK_IS_ZERO, 1, 8, &[], &[64, 192]))
+                .source
+                .channels,
             1
         );
     }

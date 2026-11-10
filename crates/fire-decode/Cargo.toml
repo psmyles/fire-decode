@@ -9,10 +9,17 @@ repository.workspace = true
 [features]
 # No default features (FD13): each app names what it uses. `psd` and `heif` need the native code in
 # `psd-sdk-sys` / `heif-sys`, so CI can still lint and test the pure-Rust core on its own. Turning
-# one off does not re-route those formats; it makes them a clear error (see `decode_psd`).
+# one off does not re-route those formats; it makes them `DecodeError::Unsupported`.
 default = []
 psd = ["dep:psd-sdk-sys"]
 heif = ["dep:heif-sys"]
+# ICC and nclx colour conversion through lcms2. Without it `DecodeOptions::honor_icc` does not
+# exist; the profile bytes still come back in `DecodedImage::icc`.
+icc = ["dep:lcms2"]
+# Camera raw, from its embedded JPEG preview.
+raw = []
+# Accept `panic = "abort"`, under which the crate's panic guard does nothing (FD7).
+allow-abort = []
 
 [dependencies]
 zune-image.workspace = true
@@ -30,7 +37,7 @@ tiff.workspace = true
 exr.workspace = true
 ddsfile.workspace = true
 bcdec_rs.workspace = true
-lcms2.workspace = true
+lcms2 = { workspace = true, optional = true }
 psd-sdk-sys = { workspace = true, optional = true }
 heif-sys = { workspace = true, optional = true }
 bytemuck.workspace = true

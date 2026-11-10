@@ -41,12 +41,12 @@ fn hdr_decodes_linear_float() {
             [0, 0, 0, 0],         // exponent 0 = true black
         ],
     );
-    let out = decode(&bytes, Some("hdr"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("hdr"), &DecodeOptions::viewer()).expect("should decode");
 
     assert_eq!((out.width, out.height), (2, 2));
     assert_eq!(out.format, PixelFormat::Rgba32Float);
-    assert_eq!(out.source_format, "Radiance HDR");
-    assert_eq!(out.channels, 3, "RGBE carries no alpha");
+    assert_eq!(out.source.name, "Radiance HDR");
+    assert_eq!(out.source.channels, 3, "RGBE carries no alpha");
     assert_eq!(pixel(&out, 0), [1.0, 1.0, 1.0, 1.0]);
     assert_eq!(pixel(&out, 1), [255.0 / 256.0, 0.5, 0.25, 1.0]);
     assert_eq!(pixel(&out, 2), [2.0, 0.0, 0.0, 1.0]);
@@ -60,7 +60,7 @@ fn hdr_decodes_linear_float() {
 fn hdr_deep_dark_pixels_stay_dark() {
     let deep_dark = [128u8, 128, 128, 96]; // 0.5 * 2^-32
     let bytes = hdr_2x2("#?RADIANCE", [deep_dark; 4]);
-    let out = decode(&bytes, Some("hdr"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("hdr"), &DecodeOptions::viewer()).expect("should decode");
 
     let expected = 0.5 * (2.0f32).powi(-32);
     for i in 0..4 {
@@ -73,9 +73,9 @@ fn hdr_deep_dark_pixels_stay_dark() {
 #[test]
 fn hdr_rgbe_signature_decodes() {
     let bytes = hdr_2x2("#?RGBE", [[128, 128, 128, 129]; 4]);
-    let out = decode(&bytes, Some("hdr"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("hdr"), &DecodeOptions::viewer()).expect("should decode");
 
-    assert_eq!(out.source_format, "Radiance HDR");
+    assert_eq!(out.source.name, "Radiance HDR");
     assert_eq!(pixel(&out, 0), [1.0, 1.0, 1.0, 1.0]);
 }
 
@@ -84,7 +84,7 @@ fn hdr_rgbe_signature_decodes() {
 #[test]
 fn hdr_routes_by_magic_not_extension() {
     let bytes = hdr_2x2("#?RADIANCE", [[128, 128, 128, 129]; 4]);
-    let out = decode(&bytes, Some("png"), &DecodeOptions::default())
+    let out = decode(&bytes, Some("png"), &DecodeOptions::viewer())
         .expect("HDR should decode regardless of the extension hint");
-    assert_eq!(out.source_format, "Radiance HDR");
+    assert_eq!(out.source.name, "Radiance HDR");
 }

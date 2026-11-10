@@ -64,11 +64,11 @@ fn psd_rgba8_decodes_merged_composite() {
         ],
     );
 
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!((out.width, out.height), (2, 2));
     assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(out.source_format, "PSD");
-    assert_eq!(out.channels, 4);
+    assert_eq!(out.source.name, "PSD");
+    assert_eq!(out.source.channels, 4);
     // Planar channels interleave into RGBA, alpha carried through.
     assert_eq!(
         out.pixels,
@@ -92,9 +92,12 @@ fn psd_rgb8_without_alpha_synthesizes_opaque_lane() {
         &[vec![200, 10], vec![30, 220], vec![40, 60]],
     );
 
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!((out.width, out.height), (2, 1));
-    assert_eq!(out.channels, 3, "a 3-channel PSD reports RGB, not RGBA");
+    assert_eq!(
+        out.source.channels, 3,
+        "a 3-channel PSD reports RGB, not RGBA"
+    );
     assert_eq!(out.pixels, vec![200, 30, 40, 255, 10, 220, 60, 255]);
     assert!(
         !out.alpha_opaque,
@@ -126,14 +129,14 @@ fn psd_rgb16_keeps_full_range_samples() {
         ],
     );
 
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!((out.width, out.height), (2, 1));
     assert_eq!(
         out.format,
         PixelFormat::Rgba16Unorm,
         "16-bit source stays 16-bit"
     );
-    assert_eq!(out.bit_depth, 16);
+    assert_eq!(out.source.bit_depth, 16);
     let s: Vec<u16> = out
         .pixels
         .as_chunks::<2>()
@@ -157,9 +160,9 @@ fn psd_rgb32f_stays_linear_float() {
         &[plane32(4.0), plane32(0.5), plane32(0.0)],
     );
 
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(out.format, PixelFormat::Rgba32Float);
-    assert_eq!(out.bit_depth, 32);
+    assert_eq!(out.source.bit_depth, 32);
     let s: Vec<f32> = out
         .pixels
         .as_chunks::<4>()
@@ -191,8 +194,8 @@ fn psd_grayscale_alpha_is_not_dropped() {
         &[vec![200, 255, 0], vec![128, 0, 255]],
     );
 
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
-    assert_eq!(out.channels, 2, "grey + alpha");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
+    assert_eq!(out.source.channels, 2, "grey + alpha");
     assert_eq!(
         out.pixels,
         vec![200, 200, 200, 128, 255, 255, 255, 0, 0, 0, 0, 255],
@@ -220,20 +223,23 @@ fn psd_spot_channels_do_not_break_the_alpha_report() {
     let out = decode(
         &psd(1, 1, COLOR_MODE_RGB, 8, &planes),
         Some("psd"),
-        &DecodeOptions::default(),
+        &DecodeOptions::viewer(),
     )
     .expect("should decode");
-    assert_eq!(out.channels, 4, "spot channels are not image channels");
+    assert_eq!(
+        out.source.channels, 4,
+        "spot channels are not image channels"
+    );
     assert_eq!(out.pixels, vec![255, 0, 0, 128]);
 
     // RGB with no alpha at all reports 3 and gets an opaque lane.
     let out = decode(
         &psd(1, 1, COLOR_MODE_RGB, 8, &rgb()),
         Some("psd"),
-        &DecodeOptions::default(),
+        &DecodeOptions::viewer(),
     )
     .expect("should decode");
-    assert_eq!(out.channels, 3);
+    assert_eq!(out.source.channels, 3);
     assert_eq!(out.pixels, vec![255, 0, 0, 255]);
 }
 
@@ -248,7 +254,7 @@ fn psd_cmyk_composites_through_k() {
 
     // No ink anywhere -> white.
     let white = psd(1, 1, CMYK, 8, &[ink(255), ink(255), ink(255), ink(255)]);
-    let out = decode(&white, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&white, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(
         out.pixels,
         vec![255, 255, 255, 255],
@@ -257,12 +263,12 @@ fn psd_cmyk_composites_through_k() {
 
     // Full black ink only -> black (this is the case K-dropping silently got right).
     let black = psd(1, 1, CMYK, 8, &[ink(255), ink(255), ink(255), ink(0)]);
-    let out = decode(&black, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&black, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(out.pixels, vec![0, 0, 0, 255]);
 
     // Full cyan ink, nothing else -> cyan.
     let cyan = psd(1, 1, CMYK, 8, &[ink(0), ink(255), ink(255), ink(255)]);
-    let out = decode(&cyan, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&cyan, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(out.pixels, vec![0, 255, 255, 255], "pure cyan, not red");
 
     // A CMYK document's alpha is its 5th plane, and it reports as colour+alpha.
@@ -273,8 +279,8 @@ fn psd_cmyk_composites_through_k() {
         8,
         &[ink(255), ink(255), ink(255), ink(255), ink(128)],
     );
-    let out = decode(&with_alpha, Some("psd"), &DecodeOptions::default()).expect("should decode");
-    assert_eq!(out.channels, 4);
+    let out = decode(&with_alpha, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
+    assert_eq!(out.source.channels, 4);
     assert_eq!(out.pixels, vec![255, 255, 255, 128]);
 }
 
@@ -284,7 +290,7 @@ fn psd_lab_converts_to_srgb() {
     const LAB: u16 = 9;
     // L is 0..255 for L* 0..100; a and b are offset by 128, so 128 is neutral.
     let white = psd(1, 1, LAB, 8, &[vec![255], vec![128], vec![128]]);
-    let out = decode(&white, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&white, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(
         out.pixels,
         vec![255, 255, 255, 255],
@@ -292,12 +298,12 @@ fn psd_lab_converts_to_srgb() {
     );
 
     let black = psd(1, 1, LAB, 8, &[vec![0], vec![128], vec![128]]);
-    let out = decode(&black, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&black, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(out.pixels, vec![0, 0, 0, 255], "L*=0 neutral is black");
 
     // L* = 50 is perceptual middle grey, which is sRGB ~119 — NOT 128.
     let mid = psd(1, 1, LAB, 8, &[vec![128], vec![128], vec![128]]);
-    let out = decode(&mid, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&mid, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     let v = out.pixels[0];
     assert!(
         (117..=121).contains(&v),
@@ -317,7 +323,7 @@ fn psd_one_bit_bitmap_mode_is_refused() {
     const BITMAP: u16 = 0;
     let bytes = psd(8, 8, BITMAP, 1, &[vec![0xff; 8]]);
     assert!(
-        decode(&bytes, Some("psd"), &DecodeOptions::default()).is_err(),
+        decode(&bytes, Some("psd"), &DecodeOptions::viewer()).is_err(),
         "1-bit documents have no readable planes and must be refused, not read past"
     );
 }
@@ -328,7 +334,7 @@ fn psd_one_bit_bitmap_mode_is_refused() {
 fn psd_grayscale_replicates_to_rgb() {
     let bytes = psd(3, 1, COLOR_MODE_GRAYSCALE, 8, &[vec![0, 128, 255]]);
 
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!((out.width, out.height), (3, 1));
     assert_eq!(
         out.pixels,
@@ -341,9 +347,9 @@ fn psd_grayscale_replicates_to_rgb() {
 #[test]
 fn psd_routes_by_magic_not_extension() {
     let bytes = psd(1, 1, COLOR_MODE_RGB, 8, &[vec![7], vec![8], vec![9]]);
-    let out = decode(&bytes, Some("png"), &DecodeOptions::default())
+    let out = decode(&bytes, Some("png"), &DecodeOptions::viewer())
         .expect("PSD should decode regardless of the extension hint");
-    assert_eq!(out.source_format, "PSD");
+    assert_eq!(out.source.name, "PSD");
 }
 
 /// A truncated PSD must be refused, not rendered.
@@ -356,14 +362,14 @@ fn psd_routes_by_magic_not_extension() {
 #[test]
 fn psd_truncated_is_rejected_not_rendered_from_uninitialized_memory() {
     // Valid signature, nothing behind it.
-    assert!(decode(b"8BPS", Some("psd"), &DecodeOptions::default()).is_err());
+    assert!(decode(b"8BPS", Some("psd"), &DecodeOptions::viewer()).is_err());
 
     // Well-formed 64x64 header, image data cut off entirely.
     let full = vec![vec![1u8; 4096], vec![1u8; 4096], vec![1u8; 4096]];
     let mut truncated = psd(64, 64, COLOR_MODE_RGB, 8, &full);
     truncated.truncate(30);
     assert!(
-        decode(&truncated, Some("psd"), &DecodeOptions::default()).is_err(),
+        decode(&truncated, Some("psd"), &DecodeOptions::viewer()).is_err(),
         "a truncated PSD must error, never decode from whatever was in the buffer"
     );
 
@@ -371,7 +377,7 @@ fn psd_truncated_is_rejected_not_rendered_from_uninitialized_memory() {
     let two_planes = vec![vec![9u8; 4], vec![9u8; 4]];
     let mut missing_plane = psd(2, 2, COLOR_MODE_RGB, 8, &two_planes);
     missing_plane[12..14].copy_from_slice(&3u16.to_be_bytes()); // header claims 3 channels
-    assert!(decode(&missing_plane, Some("psd"), &DecodeOptions::default()).is_err());
+    assert!(decode(&missing_plane, Some("psd"), &DecodeOptions::viewer()).is_err());
 }
 
 /// A colour mode that requires more planes than the header declared must be refused, not
@@ -392,14 +398,14 @@ fn psd_cmyk_and_lab_with_missing_color_planes_are_refused() {
     // CMYK needs 4 colour planes; the header declares 1.
     let bytes = psd(1, 1, CMYK, 8, &[vec![255]]);
     assert!(
-        decode(&bytes, Some("psd"), &DecodeOptions::default()).is_err(),
+        decode(&bytes, Some("psd"), &DecodeOptions::viewer()).is_err(),
         "a 1-channel CMYK document must be refused, never sampled past its planes"
     );
 
     // Lab needs 3; the header declares 2.
     let bytes = psd(1, 1, LAB, 8, &[vec![255], vec![128]]);
     assert!(
-        decode(&bytes, Some("psd"), &DecodeOptions::default()).is_err(),
+        decode(&bytes, Some("psd"), &DecodeOptions::viewer()).is_err(),
         "a 2-channel Lab document must be refused, never sampled past its planes"
     );
 }
@@ -420,7 +426,7 @@ fn psd_grayscale_bomb_amplified_by_rgba_output_is_rejected() {
     liar[18..22].copy_from_slice(&65_536u32.to_be_bytes()); // width
 
     assert!(
-        decode(&liar, Some("psd"), &DecodeOptions::default()).is_err(),
+        decode(&liar, Some("psd"), &DecodeOptions::viewer()).is_err(),
         "a header whose RGBA output would exceed the byte budget must be refused at open"
     );
 }
@@ -437,7 +443,7 @@ fn psd_decode_bomb_header_is_rejected() {
     liar[18..22].copy_from_slice(&60_000u32.to_be_bytes()); // width
 
     assert!(
-        decode(&liar, Some("psd"), &DecodeOptions::default()).is_err(),
+        decode(&liar, Some("psd"), &DecodeOptions::viewer()).is_err(),
         "a 60000x60000 header on a 40-byte file must be refused before psd_sdk allocates"
     );
 }
@@ -497,8 +503,9 @@ fn psd_with_two_icc_profiles_decodes_with_the_first() {
     image.extend_from_slice(&[1, 2, 3]);
     let bytes = psd_raw(1, 1, COLOR_MODE_RGB, 3, &res, &image);
     let opts = DecodeOptions {
+        #[cfg(feature = "icc")]
         honor_icc: false,
-        ..DecodeOptions::default()
+        ..DecodeOptions::viewer()
     };
     let out = decode(&bytes, Some("psd"), &opts).expect("should decode");
     assert_eq!(out.pixels, vec![1, 2, 3, 255]);
@@ -517,7 +524,7 @@ fn psd_grayscale_display_info_does_not_wrap_the_channel_count() {
     let mut image = 0u16.to_be_bytes().to_vec();
     image.extend_from_slice(&[50, 200]); // grey, alpha
     let bytes = psd_raw(1, 1, COLOR_MODE_GRAYSCALE, 2, &res, &image);
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(out.pixels, vec![50, 50, 50, 200]);
 }
 
@@ -537,7 +544,7 @@ fn psd_rle_run_past_the_plane_is_refused() {
     image.extend_from_slice(&[0xFF, 9]); // B
     let bytes = psd_raw(2, 1, COLOR_MODE_RGB, 3, &[], &image);
     assert!(matches!(
-        decode(&bytes, Some("psd"), &DecodeOptions::default()),
+        decode(&bytes, Some("psd"), &DecodeOptions::viewer()),
         Err(DecodeError::Malformed(_))
     ));
 }
@@ -567,13 +574,13 @@ fn psd_placeholder_merged_image_is_reported_not_decoded() {
     let mut image = 0u16.to_be_bytes().to_vec();
     image.extend_from_slice(&[255, 255, 255]);
     let bytes = psd_raw(1, 1, COLOR_MODE_RGB, 3, &version_info(false), &image);
-    let err = decode(&bytes, Some("psd"), &DecodeOptions::default()).unwrap_err();
+    let err = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).unwrap_err();
     assert!(matches!(err, DecodeError::NoMergedImage), "{err:?}");
     assert!(err.to_string().contains("Maximize Compatibility"), "{err}");
 
     // The flag alone decides it: the same file with the flag set decodes.
     let bytes = psd_raw(1, 1, COLOR_MODE_RGB, 3, &version_info(true), &image);
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(out.pixels, vec![255, 255, 255, 255]);
 }
 
@@ -582,6 +589,6 @@ fn psd_placeholder_merged_image_is_reported_not_decoded() {
 #[test]
 fn psd_without_an_image_data_section_is_no_merged_image() {
     let bytes = psd_raw(1, 1, COLOR_MODE_RGB, 3, &[], &[]);
-    let err = decode(&bytes, Some("psd"), &DecodeOptions::default()).unwrap_err();
+    let err = decode(&bytes, Some("psd"), &DecodeOptions::viewer()).unwrap_err();
     assert!(matches!(err, DecodeError::NoMergedImage), "{err:?}");
 }

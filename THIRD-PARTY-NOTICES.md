@@ -18,10 +18,11 @@ Copyright © 2010, Google Inc. All rights reserved. - <https://chromium.googleso
 License text: [`licenses/BSD-3-Clause.txt`](licenses/BSD-3-Clause.txt). Google also grants a
 patent licence for WebP; its terms are in the `PATENTS` file of the libwebp source.
 
+## Feature `icc`
+
 ### Little-CMS (lcms2) - MIT
 
-*ICC colour management. Version 2.19, compiled from source by the `lcms2-sys` crate.* It moves
-under the `icc` feature in migration step 3 (FD5); until then it is always linked.
+*ICC and nclx colour conversion. Version 2.19, compiled from source by the `lcms2-sys` crate.*
 Copyright © 2023 Marti Maria Saguer - <https://littlecms.com>
 License text: [`licenses/Little-CMS-MIT.txt`](licenses/Little-CMS-MIT.txt)
 

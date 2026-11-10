@@ -1,0 +1,30 @@
+# Per-format decode timing (FD13's local performance gate): every file given, decoded in-process
+# with fire's setup, best and median of N. Not part of any workspace, so it can be pointed at an
+# older checkout of the crate to A/B against it:
+#   cargo build --release --manifest-path bench/decode-formats/Cargo.toml
+#   bench/decode-formats/target/release/decode-formats --reps 15 <files or directories>
+# Against a checkout from before step 3 (no named setups, and no `icc` / `raw` features, which were
+# always on), copy this directory into that checkout and build it there with
+# `--no-default-features --features old-api`.
+[package]
+name = "decode-formats"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["new-api"]
+# The crate from step 3 on: fire's setup is `viewer()`, with `icc` and `raw` named.
+new-api = ["fire-decode/icc", "fire-decode/raw"]
+# The crate before step 3: `DecodeOptions::default()` and `source_format`.
+old-api = []
+
+[dependencies]
+fire-decode = { path = "../../crates/fire-decode", features = ["psd", "heif"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

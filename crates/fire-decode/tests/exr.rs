@@ -46,7 +46,7 @@ fn exr_decodes_linear_float() {
         [0.25, 0.25, 0.25, 0.5],
         [0.0, 0.0, 0.0, 0.0],
     ]);
-    let out = decode(&bytes, Some("exr"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("exr"), &DecodeOptions::viewer()).expect("should decode");
 
     assert_eq!((out.width, out.height), (2, 2));
     assert_eq!(out.format, PixelFormat::Rgba32Float);
@@ -54,7 +54,7 @@ fn exr_decodes_linear_float() {
         out.format.is_hdr(),
         "EXR is linear/HDR: exposure + tonemap apply"
     );
-    assert_eq!(out.source_format, "OpenEXR");
+    assert_eq!(out.source.name, "OpenEXR");
     assert_eq!(pixel(&out, 0), [1.0, 0.0, 0.0, 1.0]);
     assert_eq!(pixel(&out, 1), [0.0, 0.5, 0.0, 1.0]);
     assert_eq!(pixel(&out, 2), [0.25, 0.25, 0.25, 0.5]);
@@ -66,7 +66,7 @@ fn exr_decodes_linear_float() {
 #[test]
 fn exr_preserves_values_above_one() {
     let bytes = exr_2x2([[8.0, 4.0, 2.0, 1.0]; 4]);
-    let out = decode(&bytes, Some("exr"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("exr"), &DecodeOptions::viewer()).expect("should decode");
 
     for i in 0..4 {
         assert_eq!(
@@ -87,7 +87,7 @@ fn exr_alpha_is_preserved_and_not_flagged_opaque() {
         [1.0, 1.0, 1.0, 1.0],
         [1.0, 1.0, 1.0, 1.0],
     ]);
-    let out = decode(&bytes, Some("exr"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("exr"), &DecodeOptions::viewer()).expect("should decode");
 
     assert_eq!(pixel(&out, 1)[3], 0.25);
     assert!(
@@ -100,7 +100,7 @@ fn exr_alpha_is_preserved_and_not_flagged_opaque() {
 #[test]
 fn exr_fully_opaque_alpha_is_flagged() {
     let bytes = exr_2x2([[0.2, 0.4, 0.6, 1.0]; 4]);
-    let out = decode(&bytes, Some("exr"), &DecodeOptions::default()).expect("should decode");
+    let out = decode(&bytes, Some("exr"), &DecodeOptions::viewer()).expect("should decode");
     assert!(out.alpha_opaque);
 }
 
@@ -121,9 +121,9 @@ fn exr_without_alpha_channel_reports_three() {
         .expect("write rgb exr");
 
     let out =
-        decode(&buf.into_inner(), Some("exr"), &DecodeOptions::default()).expect("should decode");
+        decode(&buf.into_inner(), Some("exr"), &DecodeOptions::viewer()).expect("should decode");
     assert_eq!(
-        out.channels, 3,
+        out.source.channels, 3,
         "an RGB-only EXR has no alpha channel to report"
     );
     assert_eq!(
@@ -134,8 +134,8 @@ fn exr_without_alpha_channel_reports_three() {
 
     // ...and one that does carry alpha still reports 4.
     let with_alpha = exr_2x2([[0.2, 0.4, 0.6, 0.5]; 4]);
-    let out = decode(&with_alpha, Some("exr"), &DecodeOptions::default()).expect("should decode");
-    assert_eq!(out.channels, 4);
+    let out = decode(&with_alpha, Some("exr"), &DecodeOptions::viewer()).expect("should decode");
+    assert_eq!(out.source.channels, 4);
 }
 
 /// EXR routing is by magic bytes (`0x76 2f 31 01`), not extension: a misnamed file still reaches
@@ -143,9 +143,9 @@ fn exr_without_alpha_channel_reports_three() {
 #[test]
 fn exr_routes_by_magic_not_extension() {
     let bytes = exr_2x2([[0.5, 0.5, 0.5, 1.0]; 4]);
-    let out = decode(&bytes, Some("png"), &DecodeOptions::default())
+    let out = decode(&bytes, Some("png"), &DecodeOptions::viewer())
         .expect("EXR should decode regardless of the extension hint");
-    assert_eq!(out.source_format, "OpenEXR");
+    assert_eq!(out.source.name, "OpenEXR");
 }
 
 /// Truncated/garbage EXR data is a clean `Err`, never a panic or an abort — the header pre-read
@@ -154,11 +154,11 @@ fn exr_routes_by_magic_not_extension() {
 fn exr_garbage_errors_cleanly() {
     let mut bytes = exr_2x2([[1.0, 1.0, 1.0, 1.0]; 4]);
     bytes.truncate(bytes.len() / 2);
-    assert!(decode(&bytes, Some("exr"), &DecodeOptions::default()).is_err());
+    assert!(decode(&bytes, Some("exr"), &DecodeOptions::viewer()).is_err());
 
     // The magic alone, with no header behind it.
     let stub = [0x76, 0x2f, 0x31, 0x01, 0, 0, 0, 0];
-    assert!(decode(&stub, Some("exr"), &DecodeOptions::default()).is_err());
+    assert!(decode(&stub, Some("exr"), &DecodeOptions::viewer()).is_err());
 }
 
 /// A half-float EXR — the common kind; HDRIs and renders are written as half — stays half:
@@ -189,10 +189,10 @@ fn half_float_exr_stays_half() {
         }
         .expect("write exr fixture");
 
-        let out = decode(&buf.into_inner(), Some("exr"), &DecodeOptions::default()).unwrap();
+        let out = decode(&buf.into_inner(), Some("exr"), &DecodeOptions::viewer()).unwrap();
         assert_eq!(out.format, PixelFormat::Rgba16Float);
         assert!(out.format.is_hdr());
-        assert_eq!(out.channels, if alpha { 4 } else { 3 });
+        assert_eq!(out.source.channels, if alpha { 4 } else { 3 });
         let px: Vec<u16> = out
             .pixels
             .as_chunks::<2>()

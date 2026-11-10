@@ -36,12 +36,12 @@ fn assert_top_left(out: &DecodedImage, expected: [u8; 4], tol: i32) {
 fn avif_solid_decodes() {
     let bytes = include_bytes!("fixtures/solid.avif");
     let out =
-        decode(bytes, Some("avif"), &DecodeOptions::default()).expect("solid.avif should decode");
+        decode(bytes, Some("avif"), &DecodeOptions::viewer()).expect("solid.avif should decode");
 
     assert_eq!((out.width, out.height), (16, 16));
     assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(out.source_format, "AVIF");
-    assert_eq!(out.channels, 3, "no alpha channel in this fixture");
+    assert_eq!(out.source.name, "AVIF");
+    assert_eq!(out.source.channels, 3, "no alpha channel in this fixture");
     assert_top_left(&out, [200, 30, 40, 255], 3);
 }
 
@@ -50,12 +50,12 @@ fn avif_solid_decodes() {
 fn avif_alpha_decodes() {
     let bytes = include_bytes!("fixtures/alpha.avif");
     let out =
-        decode(bytes, Some("avif"), &DecodeOptions::default()).expect("alpha.avif should decode");
+        decode(bytes, Some("avif"), &DecodeOptions::viewer()).expect("alpha.avif should decode");
 
     assert_eq!((out.width, out.height), (16, 16));
     assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(out.source_format, "AVIF");
-    assert_eq!(out.channels, 4, "fixture carries an alpha channel");
+    assert_eq!(out.source.name, "AVIF");
+    assert_eq!(out.source.channels, 4, "fixture carries an alpha channel");
     assert_top_left(&out, [20, 180, 90, 128], 3);
 }
 
@@ -64,9 +64,9 @@ fn avif_alpha_decodes() {
 #[test]
 fn avif_routes_by_magic_not_extension() {
     let bytes = include_bytes!("fixtures/solid.avif");
-    let out = decode(bytes, Some("png"), &DecodeOptions::default())
+    let out = decode(bytes, Some("png"), &DecodeOptions::viewer())
         .expect("AVIF should decode regardless of the extension hint");
-    assert_eq!(out.source_format, "AVIF");
+    assert_eq!(out.source.name, "AVIF");
 }
 
 /// A solid HEIC decodes through libheif/libde265 to RGBA8 with the right dims, "HEIC"
@@ -75,12 +75,12 @@ fn avif_routes_by_magic_not_extension() {
 fn heic_solid_decodes() {
     let bytes = include_bytes!("fixtures/solid.heic");
     let out =
-        decode(bytes, Some("heic"), &DecodeOptions::default()).expect("solid.heic should decode");
+        decode(bytes, Some("heic"), &DecodeOptions::viewer()).expect("solid.heic should decode");
 
     assert_eq!((out.width, out.height), (16, 16));
     assert_eq!(out.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(out.source_format, "HEIC");
-    assert_eq!(out.channels, 3);
+    assert_eq!(out.source.name, "HEIC");
+    assert_eq!(out.source.channels, 3);
     assert_top_left(&out, [200, 30, 40, 255], 3);
 }
 
@@ -89,10 +89,10 @@ fn heic_solid_decodes() {
 fn heic_alpha_decodes() {
     let bytes = include_bytes!("fixtures/alpha.heic");
     let out =
-        decode(bytes, Some("heic"), &DecodeOptions::default()).expect("alpha.heic should decode");
+        decode(bytes, Some("heic"), &DecodeOptions::viewer()).expect("alpha.heic should decode");
 
     assert_eq!((out.width, out.height), (16, 16));
-    assert_eq!(out.source_format, "HEIC");
-    assert_eq!(out.channels, 4, "fixture carries an alpha channel");
+    assert_eq!(out.source.name, "HEIC");
+    assert_eq!(out.source.channels, 4, "fixture carries an alpha channel");
     assert_top_left(&out, [20, 180, 90, 128], 3);
 }

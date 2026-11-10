@@ -21,10 +21,7 @@ fn expected() -> serde_json::Map<String, Value> {
 
 /// Full size, no ICC conversion: the pixels as libheif hands them over.
 fn opts() -> DecodeOptions {
-    DecodeOptions {
-        max_dim: 0,
-        honor_icc: false,
-    }
+    DecodeOptions::inspect()
 }
 
 fn read(name: &str) -> Result<DecodedImage, DecodeError> {
@@ -131,7 +128,7 @@ fn every_fixture_decodes_or_fails_as_expected_json_says() {
                 }
                 if kind == "still" && e["bit_depth"].as_u64() != Some(8) {
                     assert_eq!(
-                        Some(img.bit_depth as u64),
+                        Some(img.source.bit_depth as u64),
                         e["bit_depth"].as_u64(),
                         "{name}: bit depth"
                     );

@@ -26,7 +26,9 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{DecodeError, DecodeOptions, DecodedImage, PixelFormat, check_dims};
+use crate::{
+    DecodeError, DecodeOptions, DecodedImage, Format, Limits, PixelFormat, SourceInfo, check_dims,
+};
 
 const MODE_GRAYSCALE: u16 = 1;
 const MODE_RGB: u16 = 3;
@@ -375,8 +377,8 @@ impl PsdLayers {
             )
             || width == 0
             || height == 0
-            || width as usize > crate::MAX_DECODE_DIM
-            || height as usize > crate::MAX_DECODE_DIM
+            || width > Limits::VIEWER.max_dim
+            || height > Limits::VIEWER.max_dim
         {
             return Ok(None);
         }
@@ -502,6 +504,8 @@ impl PsdLayers {
             .layers
             .get(index)
             .ok_or_else(|| malformed("no such layer"))?;
+        // The calling thread is one of the budget's for the whole decode (FD8).
+        let _seat = crate::budget::Seat::take();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.decode_inner(info, opts, ctl)
         }))
@@ -522,7 +526,7 @@ impl PsdLayers {
         let clip = info.clip;
         let (cw, ch) = (clip.width() as usize, clip.height() as usize);
         let bps = self.depth as usize / 8;
-        check_dims(cw, ch, 4 * bps, "PSD layer")?;
+        check_dims(cw, ch, 4 * bps, "PSD layer", &opts.limits)?;
 
         let colour_count = match self.mode {
             MODE_GRAYSCALE | MODE_DUOTONE => 1,
@@ -558,6 +562,7 @@ impl PsdLayers {
         // in place by the row pass.
         let bytes: &[u8] = &self.bytes;
         let depth = self.depth;
+        let limits = &opts.limits;
         let mut jobs: Vec<(usize, ChannelRec, Rect)> = Vec::new();
         for (i, c) in colour.iter().enumerate() {
             if let Some(c) = c {
@@ -584,8 +589,10 @@ impl PsdLayers {
         }
 
         let mut sources: Vec<(usize, Plane)> = Vec::with_capacity(jobs.len());
-        // At most `threads` workers, each taking every `workers`-th channel.
-        let workers = resolve_threads((ctl.threads)()).min(jobs.len());
+        // At most `threads` workers, as many as the budget lends, each taking every `workers`-th
+        // channel.
+        let lease = crate::budget::lease(requested_threads(ctl).min(jobs.len()));
+        let workers = lease.threads().min(jobs.len());
         let prepared: Vec<Result<(usize, Plane), LayerError>> = if workers > 1 {
             std::thread::scope(|s| {
                 let handles: Vec<_> = (0..workers)
@@ -596,7 +603,8 @@ impl PsdLayers {
                                 .skip(first)
                                 .step_by(workers)
                                 .map(|&(slot, c, r)| {
-                                    prepare_plane(bytes, c, r, depth, ctl.cancel).map(|p| (slot, p))
+                                    prepare_plane(bytes, c, r, depth, limits, ctl.cancel)
+                                        .map(|p| (slot, p))
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -613,10 +621,11 @@ impl PsdLayers {
         } else {
             jobs.iter()
                 .map(|&(slot, c, r)| {
-                    prepare_plane(bytes, c, r, depth, ctl.cancel).map(|p| (slot, p))
+                    prepare_plane(bytes, c, r, depth, limits, ctl.cancel).map(|p| (slot, p))
                 })
                 .collect()
         };
+        drop(lease);
         for p in prepared {
             sources.push(p?);
         }
@@ -672,7 +681,8 @@ impl PsdLayers {
                 }
             }
         };
-        let row_threads = resolve_threads((ctl.threads)()).min(bands.len()).max(1);
+        let lease = crate::budget::lease(requested_threads(ctl).min(bands.len()));
+        let row_threads = lease.threads();
         if row_threads > 1 {
             std::thread::scope(|s| {
                 for _ in 1..row_threads {
@@ -683,6 +693,7 @@ impl PsdLayers {
         } else {
             run();
         }
+        drop(lease);
         drop(bands);
         if let Some(e) = failed.into_inner().unwrap() {
             return Err(malformed(e));
@@ -701,35 +712,35 @@ impl PsdLayers {
                 32 => PixelFormat::Rgba32Float,
                 _ => PixelFormat::Rgba8Unorm,
             },
-            bit_depth: depth as u8,
-            channels: if grey { 2 } else { 4 },
-            palette: false,
+            source: SourceInfo::new(Format::Psd, "PSD", if grey { 2 } else { 4 }, depth as u8),
             alpha_opaque: false,
             icc: self.icc.clone(),
-            source_format: "PSD",
             downscaled_from: None,
             source_mips: None,
             layout: None,
             animation: None,
         };
 
-        let stage_threads = resolve_threads((ctl.threads)());
+        let stage_threads = requested_threads(ctl);
+        #[cfg(feature = "icc")]
         if opts.honor_icc {
-            crate::with_max_threads(stage_threads, || crate::icc::apply(&mut img));
+            crate::budget::with_cap(stage_threads, || crate::icc::apply(&mut img));
         }
         if (ctl.cancel)() {
             return Err(LayerError::Cancelled);
         }
         let origin = (clip.left as u32, clip.top as u32);
+        // A layer always shrinks nearest-neighbour, whatever the setup's filter, so it lands on
+        // exactly the pixels of the composite fire shrank the same way.
         let (canvas, origin) = crate::downscale::rect_to_fit(
             &mut img,
             (self.width, self.height),
             origin,
-            opts.max_dim,
+            opts.fit.map_or(0, |f| f.max),
         );
         let full_canvas = origin == (0, 0) && (img.width, img.height) == canvas;
         img.alpha_opaque =
-            full_canvas && crate::with_max_threads(stage_threads, || crate::alpha_is_opaque(&img));
+            full_canvas && crate::budget::with_cap(stage_threads, || crate::alpha_is_opaque(&img));
         Ok(LayerImage {
             image: img,
             origin,
@@ -738,12 +749,12 @@ impl PsdLayers {
     }
 }
 
-fn resolve_threads(requested: usize) -> usize {
-    let avail = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
-    if requested == 0 {
-        avail
-    } else {
-        requested.min(avail).max(1)
+/// The threads the caller allows the next stage, the core count for "as many as allowed". The
+/// budget lends what it has free, up to that (FD8).
+fn requested_threads(ctl: &LayerCtl) -> usize {
+    match (ctl.threads)() {
+        0 => crate::budget::cores(),
+        n => n,
     }
 }
 
@@ -848,6 +859,7 @@ fn prepare_plane<'a>(
     c: ChannelRec,
     rect: Rect,
     depth: u16,
+    limits: &Limits,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Plane<'a>, LayerError> {
     let bps = depth as usize / 8;
@@ -855,7 +867,7 @@ fn prepare_plane<'a>(
     if c.len <= 2 || w == 0 || h == 0 {
         return Ok(Plane::Empty);
     }
-    check_dims(w, h, bps, "PSD layer channel")?;
+    check_dims(w, h, bps, "PSD layer channel", limits)?;
     let end = c
         .offset
         .checked_add(c.len)

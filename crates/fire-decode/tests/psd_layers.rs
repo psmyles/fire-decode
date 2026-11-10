@@ -401,7 +401,7 @@ fn open(doc: &Doc) -> PsdLayers {
 
 fn decode(layers: &PsdLayers, i: usize) -> fire_decode::LayerImage {
     layers
-        .decode_layer(i, &DecodeOptions::default(), &LayerCtl::DEFAULT)
+        .decode_layer(i, &DecodeOptions::viewer(), &LayerCtl::DEFAULT)
         .expect("decodes")
 }
 
@@ -489,7 +489,7 @@ fn rgba8_layers_in_a_group() {
     assert_eq!(img.origin, (1, 1));
     assert_eq!((img.image.width, img.image.height), (2, 2));
     assert_eq!(img.image.format, PixelFormat::Rgba8Unorm);
-    assert_eq!(img.image.channels, 4);
+    assert_eq!(img.image.source.channels, 4);
     assert!(!img.image.alpha_opaque);
     assert_eq!(
         img.image.pixels,
@@ -745,13 +745,16 @@ fn colour_modes_match_the_composite() {
             };
             let bytes = build(&doc);
             let composite =
-                fire_decode::decode(&bytes, Some("psd"), &DecodeOptions::default()).unwrap();
+                fire_decode::decode(&bytes, Some("psd"), &DecodeOptions::viewer()).unwrap();
             let layer = decode(&PsdLayers::open(Arc::new(bytes)).unwrap().unwrap(), 0);
             assert_eq!(
                 composite.pixels, layer.image.pixels,
                 "mode {mode} at {depth}-bit"
             );
-            assert_eq!(layer.image.channels, if mode == GRAY { 2 } else { 4 });
+            assert_eq!(
+                layer.image.source.channels,
+                if mode == GRAY { 2 } else { 4 }
+            );
         }
     }
 }
@@ -795,8 +798,11 @@ fn downscaled_layers_line_up_with_the_downscaled_composite() {
     };
     let bytes = build(&doc);
     let opts = DecodeOptions {
-        max_dim: 16,
-        ..DecodeOptions::default()
+        fit: Some(fire_decode::Fit {
+            max: 16,
+            filter: fire_decode::Filter::Nearest,
+        }),
+        ..DecodeOptions::viewer()
     };
     let composite = fire_decode::decode(&bytes, Some("psd"), &opts).unwrap();
     let layers = PsdLayers::open(Arc::new(bytes)).unwrap().unwrap();
@@ -873,7 +879,7 @@ fn cancelled_decode_reports_cancelled() {
         cancel: &cancel,
     };
     assert!(matches!(
-        layers.decode_layer(0, &DecodeOptions::default(), &ctl),
+        layers.decode_layer(0, &DecodeOptions::viewer(), &ctl),
         Err(LayerError::Cancelled)
     ));
 }
@@ -916,7 +922,7 @@ fn malformed_channel_data_is_an_error() {
     bytes[data..data + 2].copy_from_slice(&7u16.to_be_bytes());
     let layers = PsdLayers::open(Arc::new(bytes)).unwrap().unwrap();
     assert!(matches!(
-        layers.decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT),
+        layers.decode_layer(0, &DecodeOptions::viewer(), &LayerCtl::DEFAULT),
         Err(LayerError::Decode(_))
     ));
 
@@ -931,7 +937,7 @@ fn malformed_channel_data_is_an_error() {
     let layers = PsdLayers::open(Arc::new(bytes)).unwrap().unwrap();
     assert!(
         layers
-            .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
+            .decode_layer(0, &DecodeOptions::viewer(), &LayerCtl::DEFAULT)
             .is_err()
     );
 
@@ -945,7 +951,7 @@ fn malformed_channel_data_is_an_error() {
     let layers = PsdLayers::open(Arc::new(bytes)).unwrap().unwrap();
     assert!(
         layers
-            .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
+            .decode_layer(0, &DecodeOptions::viewer(), &LayerCtl::DEFAULT)
             .is_err()
     );
 }
@@ -998,7 +1004,7 @@ fn extreme_bounds_are_handled() {
     assert_eq!(layers.layers()[0].clip.width(), 2);
     assert!(
         layers
-            .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
+            .decode_layer(0, &DecodeOptions::viewer(), &LayerCtl::DEFAULT)
             .is_err()
     );
 }
@@ -1057,7 +1063,7 @@ fn sample_file_decodes_every_layer() {
             };
             let t = std::time::Instant::now();
             let img = layers
-                .decode_layer(i, &DecodeOptions::default(), &ctl)
+                .decode_layer(i, &DecodeOptions::viewer(), &ctl)
                 .unwrap();
             println!(
                 "{i:2} {:30} {label:>3} {:7.1} ms  {}x{} at {:?}",
