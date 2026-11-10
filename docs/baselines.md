@@ -267,3 +267,76 @@ three times at each budget, sampling the process's thread count with `ps -M` and
 The 48 MP grid is faster because the budget gives it 8 tile threads where libheif's default is 4,
 and because a copy is gone. No format is slower beyond noise. The raw launches are in
 `local/ttfp-macos-step2b.csv`.
+
+## Step 3 on macOS: the API changes
+
+10 November 2026. This repository at `1e93600`; fire's `fire-decode` branch (`f45b210`), which
+drops the in-tree crates and builds on this checkout through an untracked `[patch]` in
+`~/Dev/.cargo/config.toml`. Rust 1.99.1.
+
+- **This workspace:** 217 tests with every feature, 172 with none; clippy clean on all four CI sets.
+- **fire's tests:** 197 passed, with and without features: the 194, plus the installer test moved
+  in from the crate, fire-cli's rotated JPEG (it reports its stored 16×8, not the upright 8×16) and
+  fire-thumbs' cubemap thumbnail (decoded with fire-shellext's setup, all six faces drawn).
+- **The binary:** `minos 11.0`, 10,501,328 bytes (115 KB less than step 2b's).
+- **`probe()` against `decode()` with `inspect()`** (`tests/probe.rs`): equal size and format on
+  every format the test builds, on every HEIF fixture that decodes, and on 188 corpus images (bite's
+  `test_images`, `local/corpus`, 3D Review's `assets`, CrimeCrew's `Assets`, fire's `assets`): 128
+  PNG, 23 JPEG, 17 TGA, 6 Radiance HDR, 4 PSD, 3 HEIC, 3 AVIF, 2 EXR, 2 ICO.
+
+**Per-format decode** (`bench/decode-formats`, in process, fire's setup): the median of 15 decodes
+per file, the median of three interleaved rounds, against step 2b (`34c48f8`). The raw files are
+`local/bench-step2b-r*.tsv` and `local/bench-step3-r*.tsv`.
+
+| Format | Files | Step 2b (ms, sum) | Step 3 (ms, sum) | Change |
+| --- | --- | --- | --- | --- |
+| JPEG | 23 | 692.3 | 694.0 | +0.2% |
+| PNG | 5 | 275.4 | 275.2 | -0.1% |
+| TGA | 8 | 13.7 | 13.6 | -0.9% |
+| PSD | 3 | 195.9 | 196.2 | +0.2% |
+| OpenEXR | 2 | 68.9 | 66.9 | -2.9% |
+| HEIC | 3 | 297.7 | 254.4 | -14.5% |
+| AVIF | 3 | 257.6 | 249.6 | -3.1% |
+
+No format is more than 2% slower (FD13's rule for a tag). HEIC and AVIF gain from the budget:
+libheif and the colour transform their iPhone profiles need now lease the free cores, where step
+2b's budget stopped at 8.
+
+**Threads (FD8).** Three things changed on the way, each measured:
+- A pass leasing 14 threads on a 4-8 MiB buffer was 0.06-0.25 ms slower than 8 (up to 9% of a
+  1 ms TGA): the spawns cost more than the memory-bound pass saved. Passes over memory now take at
+  most 8, and nothing under 1 MiB is split.
+- Capping every pass at 8 also capped the colour transform, and HEIC's gain fell from 20% to 14%.
+  Work bound by computation (lcms2, the area filter, libheif) takes every free core again.
+- Leasing all 14 cores slowed fire's TTFP on a 12 MP HEIC by 2% (30 launches each), though the
+  decode was faster: fire's startup competes for them. With the budget at 8 the gain on a 48 MP
+  HEIC went; at 12 (the cores less two) both held. The budget is now the cores less two, never
+  below `min(cores, 8)`.
+
+**TTFP**, 12 launches each, against `local/bin/fire-step2b` (`local/ttfp-macos-step3.txt`):
+
+| File | Step 2b (ms) | Step 3 (ms) | Change |
+| --- | --- | --- | --- |
+| `28-4928x3264.jpg` | 193.7 | 190.6 | -1.6% |
+| `58-1280x853.jpg` | 190.2 | 191.3 | +0.6% |
+| `T_Clock_D.jpg` | 195.3 | 197.3 | +1.0% |
+| `T_CliffRock_01_N.png` | 218.4 | 221.8 | +1.6% |
+| `T_DeadTree_03_N.png` | 196.1 | 195.5 | -0.3% |
+| `Explosion02HD_5x5.tga` | 201.9 | 198.6 | -1.6% |
+| `FireBall02_8x8.tga` | 195.2 | 198.9 | +1.9% |
+| `IMG_2131.HEIC` | 199.3 | 200.3 | +0.5% |
+| `IMG_2135.HEIC` (48 MP) | 258.6 | 240.2 | -7.1% |
+| `IMG_2139.HEIC` (portrait) | 198.8 | 201.8 | +1.5% |
+| `IMG_2131.avif` | 194.0 | 202.4 | +4.3% (30 launches: +0.2%) |
+| `IMG_2135.avif` | 237.6 | 233.5 | -1.7% |
+| `IMG_2139.avif` | 199.1 | 198.3 | -0.4% |
+| `T_CliffRock_01_N.exr` | 223.6 | 222.5 | -0.5% |
+| `T_Sides_D.psd` | 193.6 | 194.6 | +0.5% |
+| `rgb16_4096.psd` | 204.9 | 204.8 | -0.0% |
+| `big_rgba8_8192.psd` | 301.0 | 300.4 | -0.2% |
+
+Rerun at 30 launches (`local/ttfp-macos-step3-n30.txt`, `-ab.txt`), the 12 MP HEICs came out
+between -5.0% and +2.0% and the TGA between -1.9% and +1.6%, with an A/A run of step 2b against
+itself 5.4% apart on that TGA in the same session (`-aa.txt`). No format is slower beyond the
+harness's noise, and the 48 MP HEIC is 7% faster. So step 3's macOS gate passes; its Windows half
+is in `docs/PLAN.md`, "Needs Windows".

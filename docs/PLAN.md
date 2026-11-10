@@ -1,7 +1,7 @@
 # fire-decode - Work Plan
 
 **Status, 10 November 2026:** the crate lives here now (step 1's Mac part), the repository is public,
-and work continues on a Mac with steps 2a, 2b and 3. Everything that needs Windows is collected in
+and steps 2a, 2b and 3 are done on a Mac; fire builds on step 3's API on its `fire-decode` branch. Everything that needs Windows is collected in
 "Needs Windows", kept current as the Mac work goes, to be done in one stretch afterwards. fire,
 3D Review and bite still decode with their own copies until they move to a tag.
 
@@ -125,11 +125,43 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
      cd/m² at white, highlights clipped, sRGB-encoded), so bite's previews of those files will
      differ from ImageMagick's.
 
-6. **Step 3, the API changes** (setups including `inspect()`, `output` including `Rgba8OrFloat`,
-   `source`, `limits`, `hdr`, `fit`, `frames`, `surfaces`, `stored_mips`, `probe()`, thread budget,
-   panic guard, `DecodeCtl`). Platform-neutral. fire uses them on a branch, through a
-   `[patch]` pointing at this checkout, in a `.cargo/config.toml` in the folder that holds both
-   checkouts. fire's own `.cargo/config.toml` is committed, so it isn't the place.
+6. **Step 3, the API changes - done on the Mac** (10 November 2026). The signatures as built are in
+   `fire-decode-plan.md` §4, with what changed on the way.
+   - **The crate:**
+     - the four named setups with their limits;
+     - `output`, `fit` with the area filter, `frames`, `surfaces`, `stored_mips`, `max_threads`;
+     - `source` (`SourceInfo`), the public `Format`, `sniff`, both extension lists and `probe()`;
+     - `DecodeError::Unsupported` / `Cancelled` / `Panicked`, and the panic guard with
+       `allow-abort`;
+     - `DecodeCtl`, wired into libheif;
+     - the `icc` and `raw` features, and Display P3 / BT.2020 nclx converted in `viewer()`.
+   - **The thread budget** is the cores less two, never below `min(cores, 8)`. Passes over memory
+     take at most 8 threads, and computation (colour, the area filter, libheif) takes the rest.
+     Each choice is measured in [`baselines.md`](baselines.md).
+   - **fire's `fire-decode` branch** builds on it. The in-tree crates are gone and
+     `Cargo.toml` points at this repository, patched to this checkout by an untracked
+     `~/Dev/.cargo/config.toml`. On the branch:
+     - the viewer is on `viewer()`;
+     - fire-shellext is on `fire_thumbs::decode_options()`;
+     - fire-cli is on `inspect()`, with no per-worker thread share;
+     - the installer test has moved in from the crate.
+   - **The macOS gate passed:**
+     - 217 tests here, and fire's 197;
+     - extensions under every CI set;
+     - `probe()` equals `decode()` over the fixtures and 188 corpus images;
+     - fire-shellext's setup still draws every face of a cubemap;
+     - fire-cli reports a rotated JPEG's stored size;
+     - no format slower in-process (HEIC 14.5% faster) or in fire's TTFP (48 MP HEIC 7% faster).
+
+7. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`; its
+   gate's Windows half joins "Needs Windows":
+   - **step 4:** 3D Review adopts `texture()` (its `docs/PLAN.md`, B.3). Its tag-dependent parts
+     wait for item 6 below;
+   - **step 5:** bite adopts `thumbnail()` and `probe()`;
+   - **step 6** (fire only, any time after 3): the tonemap's negatives (6a), PQ / HLG to `Linear`
+     and to SDR (6b), gain maps (6c), sequences with HEIF progress and cancel in the loading bar
+     (6d);
+   - **step 7:** the `mips` feature.
 
 The gates are in `fire-decode-plan.md` §5. On a Mac only their macOS halves can pass, so record each
 gate as "macOS passed; Windows pending".
@@ -158,8 +190,8 @@ The Windows stretch, in order. Each item names what it unblocks.
      `MSVCRT`), no encoders.
    - Update VENDOR.txt and `THIRD-PARTY-NOTICES.md` with the Windows versions, and commit the
      libraries alone in one commit.
-3. **CI's Windows job** (FD13): fmt, clippy and tests for core, psd and psd + heif on `windows-latest`,
-   with `crt-static`. Its `.cargo/config.toml` or `RUSTFLAGS` must not reach the macOS job's
+3. **CI's Windows job** (FD13): fmt, clippy and tests for the four sets the macOS job runs (core,
+   psd, psd + heif, psd + heif + icc + raw) on `windows-latest`, with `crt-static`. Its `.cargo/config.toml` or `RUSTFLAGS` must not reach the macOS job's
    "heif without crt-static is a named error" check.
 4. **fire on the static CRT** (FD20): `-C target-feature=+crt-static` for `x86_64-pc-windows-msvc` in
    fire's `.cargo/config.toml`. Check that nothing prebuilt is `/MD`, and that `fire.exe`,
@@ -174,11 +206,14 @@ The Windows stretch, in order. Each item names what it unblocks.
 6. **The first release:** tag `v0.1.0`. Its GitHub release carries the upstream source tarballs of
    libheif 1.23.7, libde265 1.1.3 and dav1d 1.5.4, plus the triplets (FD14). The tarballs can be
    fetched anywhere; the tag waits for item 2.
-7. **fire moves to the tag:**
-   - `fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "v0.1.0" }`, and fire's
-     three in-tree crates removed;
-   - the installer-association test moves into a fire crate, checking `all_extensions()` once step 3
-     adds it (FD2, FD9);
+7. **fire moves to the tag**, by merging its `fire-decode` branch, which already drops the three
+   in-tree crates and carries the installer test (FD2, FD9). Then:
+   - `fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "v0.1.0" }` in place of
+     `branch = "main"`;
+   - fire's CI follows: no `-p fire-decode` in the decoder-free job, no vendored-artifact checks or
+     LLVM install in the native one (the crate brings its libraries, and bindgen is gone), and a
+     toolchain of at least 1.99, the crate's `rust-version`. fire's `stable` here is 1.98.1, so the
+     Mac builds used `cargo +1.99.1`;
    - fire's notices point at this repository's tree at the tag, with libheif / libde265 as
      LGPL-3.0-or-later, not `-only` (FD14).
 
@@ -194,7 +229,18 @@ The Windows stretch, in order. Each item names what it unblocks.
      Process Explorer or `Get-Process`;
    - fire-shellext thumbnails a HEIC through ABI v2.
 
-The Windows half of step 3 is added below when step 3 is done on the Mac.
+10. **Step 3's Windows half** (fire's `fire-decode` branch, or `main` after item 7):
+    - **fire-shellext compiles:** its decode call changed and only builds on Windows. It thumbnails
+      a cubemap DDS with every face, and a HEIC, in Explorer;
+    - **fire's TTFP** per format against item 1's baseline. The budget's size depends on the
+      machine's cores (the cores less two, at least `min(cores, 8)`), so check the HEICs especially;
+    - **the per-format bench:**
+      - `bench/decode-formats` against step 2b, built in a worktree of `34c48f8` with
+        `--features old-api`, over fire's validation set;
+      - no format more than 2% slower;
+    - **`tests/probe.rs` with `FIRE_DECODE_CORPUS`** pointing at fire's validation set;
+    - **fire-cli's tests**, the rotated JPEG included, and Asset Check over CrimeCrew's textures
+      with the same results as before, apart from rotated JPEGs now reporting their stored size.
 
 ## References
 
