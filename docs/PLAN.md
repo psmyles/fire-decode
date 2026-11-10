@@ -165,25 +165,25 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
    threads' included, from any other (FD7).
 
 8. **Step 5, bite on `thumbnail()` and `probe()` - done on the Mac** (10 November 2026), on
-   bite's `fire-decode` branch (`5aa3905`), which merges with the first tag. bite has no work plan
+   bite's `fire-decode` branch (`01ee7ff`), which merges with the first tag. bite has no work plan
    of its own: the commit message has the change, the plan's FD8-FD10, FD12 and FD19 have it as
    built, and [`baselines.md`](baselines.md) has the gate:
-   - **Cold import:** faster for every routed format, by 64-96%. JPG, still on ImageMagick, is
+   - **Cold import:** faster for every routed format, by 63-92%. JPG, still on ImageMagick, is
      unchanged.
    - **Warm re-import:** no `magick` process for any crate format.
    - **`probe()` against `identify`:** the same size on all 115 files `identify` can read.
    - **HEIC orientation:** identical to ImageMagick's.
    - **Thumbnails:** the same picture, ICC kept, alpha where it was.
    - **Over 30000 px:** still thumbnailed, through ImageMagick.
-   - **Cache size:** three to seven times larger (lossless).
+   - **Cache size:** unchanged. Thumbnails stay lossy at quality 85, through libwebp: lossless
+     ones were three to seven times larger, and the lossy fallback was chosen (FD12).
    - **Two findings:**
      - Concurrent decodes must each be capped to their share of the cores: a lease is greedy and
        held for the whole decode (FD8). bite caps them.
      - ImageMagick un-blends a white matte from any PSD with a 4th merged channel, which is wrong
        for a flat mask texture. Whether Photoshop's own transparent documents need it is open
        (plan §6, PSD).
-   - **Decisions for later:** the lossy fallback if 1024 px photo caches prove too big (FD12), and
-     a fairer lease in the crate (FD8).
+   - **Decision for later:** a fairer lease in the crate (FD8).
 
 9. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`; its
    gate's Windows half joins "Needs Windows":
