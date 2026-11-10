@@ -574,3 +574,75 @@ new work is one parse of the `meta` box.
 - **Nothing else moved:** `texture()` / `thumbnail()` output identical to 6c on all 137 files.
 - **The crate's suite** passes under all four CI sets (175 / 198 / 225 / 236), clippy clean. fire:
   203 tests (201 without `heif`), clippy clean; both sequences open in its release build.
+
+## Step 7 on macOS: the `mips` feature
+
+10 November 2026. This repository at `e815b0d`; fire's `fire-decode` branch at `c66ac58`; 3D
+Review's `fire-decode` branch at `b653de2`, against `544c20b` (step 4 plus the gate's new texture
+measures).
+
+**Chains against the builders they replace**, over every file in bite's `test_images`,
+`local/corpus`, 3D Review's textures and the HEIF fixtures that decode (85 files), with
+`viewer()`:
+- **8-bit** (67 files): byte-identical to fire's `render/mips.rs`, and to 3D Review's
+  `rhi/mips.rs` in both its modes (sRGB and raw, capped at 16 levels). `fit` matches
+  `halved_to_fit` on every file over 512 px.
+- **16-bit unorm** (10 files): up to 2 in 65535 apart, on at most 0.9% of samples: the crate
+  rounds the mean exactly, where fire's builder went through `f32`.
+- **Half float:** the two OpenEXRs differ on 0.15% of samples. fire's half-to-float table halved
+  every subnormal (2046 bit patterns disagree with `half`'s exact conversion, all of them
+  subnormals), so those values and the levels built from them were off by up to 2×; all are
+  below 6.1×10⁻⁵. The float-to-half encoders agree on every value sampled.
+- **32-bit float** (6 files): identical.
+
+**Speed**, median of 15, the crate's builder against each old one (M3 Max):
+
+| File | fire's builder | crate | 3D Review's (1 thread) | crate (1 thread) |
+| --- | --- | --- | --- | --- |
+| `28-4928x3264.jpg` | 4.85 ms | 3.86 ms | 31.3 ms | 24.3 ms |
+| `IMG_2135.HEIC` (5712×4284) | 6.79 ms | 5.30 ms | 46.2 ms | 36.3 ms |
+| `T_CliffRock_01_N.png` (4096²) | 4.82 ms | 3.92 ms | 32.6 ms | 26.2 ms |
+| `big_rgba8_8192.psd` | 18.7 ms | 14.2 ms | 124.7 ms | 100.7 ms |
+| `rgb16_4096.psd` (16-bit) | 2.36 ms | 2.41 ms | | |
+| `T_CliffRock_01_N.exr` (half) | 17.7 ms | 4.37 ms | | |
+| `T_HDR_01.hdr` (32-bit) | 0.37 ms | 0.16 ms | | |
+
+**fire's TTFP**, `scripts/ttfp.sh -A local/bin/fire-step6d -B local/bin/fire-step7 -N 12` over
+step 0's 13 files (`local/ttfp-macos-step7.csv`): every file within the harness's noise, from
+-5.9% (`T_Sides_D.psd`) to +3.7% (`FireBall02_8x8.tga`). That one again at 20 launches each:
+223.5 ms against 224.1 ms (+0.3%).
+
+**3D Review, frame times while textures load:** gate mode now records, for a fixture whose
+materials name textures, the frames presented while they load and the frame that binds and
+uploads them (`544c20b`). The fixture is eight planes made in Blender, each reading a 4-5K photo
+(base colour), a 1-4K normal map and a 1-2K roughness map from bite's `test_images` by absolute
+path: 15 images, 24 bindings. `scripts/gate.sh -n 15`
+(`local/gate-3d-review-macos-step7-textures.txt`):
+
+| Measure | `544c20b` | `b653de2` | Change |
+| --- | --- | --- | --- |
+| The frame that uploads them | 346.9 ms | 90.2 ms | -74% |
+| Frames while they load, median | 8.415 ms | 8.456 ms | +0.5% |
+| Frames while they load, longest | 25.6 ms | 23.7 ms | -7.4% |
+| Steady frame | 3.364 ms | 3.420 ms | +1.6% (+0.056, budget +0.3) |
+| Footprint | 2220 MB | 2303 MB | +3.7% (budget +5%) |
+
+The footprint is the chains, now kept with each image so that each of the three caches showing it
+(material slot, Tex viewport, UV view) takes the same one. The startup gate on
+`SM_Wall_Break_4x3m.fbx`, which names no textures (`local/gate-3d-review-macos-step7.txt`):
+startup -0.8%, frame +1.1%, footprint +0.2%. Passed.
+
+**The UV-checker bake still builds**, from `build/mips.rs`, and both checkers' deflated BC7 chains
+hash the same as every earlier bake in the tree's build directories. `tests/bake_mips.rs` holds
+the bake's filter to the crate's byte for byte (noise at eight sizes in both modes, and the two
+checker PNGs).
+
+**Nothing else moved in 3D Review:** `review-snapshot` renders of the 15-texture model, the HEIC
+and AVIF planes and the 20000-px plane are byte-identical between `544c20b` and `b653de2`, and
+the Quick Look thumbnail of the HEIC plane is byte-identical to step 4's.
+
+**Suites:** the crate under all five CI sets (175 / 198 / 225 / 242 / 253), clippy clean. fire:
+193 workspace tests, clippy clean (with and without default features). 3D Review: every test
+passes but `a_classic_material_imports_as_a_dielectric` (fails on `main` too) and two
+`every_fixture_the_suite_loads_exists`, for models this Mac doesn't have
+(`stylized_palm_plant_04.fbx`, `SM_column04.fbx`); clippy clean.

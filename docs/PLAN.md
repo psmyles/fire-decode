@@ -211,8 +211,22 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
     progress only rises, and a cancel stops a long sequence. fire plays a sequence's loop count
     and cancels a decode its window has moved on from.
 
-12. **Next on the Mac:** **step 7**, the `mips` feature (FD11): fire uses it, 3D Review builds
-    chains on its workers and settles `rhi/mips.rs`'s place in the UV-checker bake.
+12. **Step 7, the `mips` feature - done on the Mac** (10 November 2026): the crate in `main`
+    (`e815b0d`), fire on its branch (`c66ac58`), 3D Review on its branch (`544c20b`, `b653de2`).
+    The plan's FD11 has it as built and [`baselines.md`](baselines.md) the gate:
+    - **the builder:** `fire_decode::mips`, fire's builder plus 3D Review's raw mode and level
+      cap. 8-bit chains are byte-identical to both apps' old builders; the builder is faster on
+      every format;
+    - **fire's TTFP** within noise on all 13 files;
+    - **3D Review** keeps each chain with its decoded image, built on the decode workers for a
+      model's textures. The frame that uploads a 15-texture model's textures went from 347 to
+      90 ms; frames while they load are unchanged; footprint +3.7%;
+    - **the UV-checker bake** keeps its own copy of the filter (`build/mips.rs`), held to the
+      crate's by a test; its output is unchanged.
+
+13. **Every step is done on the Mac.** What remains is the Windows stretch below, then the first
+    tag (item 6) and the apps' merges onto it. One open decision: a fairer lease in the crate
+    (FD8, item 8).
 
 The gates are in `fire-decode-plan.md` §5. On a Mac only their macOS halves can pass, so record each
 gate as "macOS passed; Windows pending".
@@ -319,6 +333,16 @@ The Windows stretch, in order. Each item names what it unblocks.
       Direct3D 11, and `H` again returns to the base;
     - **`seq_hevc.heif` plays three times and stops**, `seq_infinite.avif` loops, and navigating
       away from `seq_over_cap.avif` mid-decode frees the pool at once.
+
+14. **Step 7's Windows half** (fire's and 3D Review's `fire-decode` branches):
+    - **fire's TTFP** over step 0's files against step 6's build, within 2%, the OpenEXRs
+      included: the builder's half-float path is new (`half`'s conversion, with F16C where the
+      CPU has it);
+    - **3D Review's gate** (`scripts/gate.ps1`) with a model naming many large textures, as on
+      the Mac: the upload frame shorter, frames while they load and the private / GPU bytes
+      within budget; and its startup gate against step 4's build;
+    - **the UV checker** in the viewer looks as before (the bake is unchanged on the Mac, so this
+      is a check of the build, not the filter).
 
 ## References
 
