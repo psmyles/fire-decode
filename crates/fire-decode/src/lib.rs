@@ -655,9 +655,23 @@ pub fn decode_with_progress(
 }
 
 /// Run `f`, turning a panic into [`DecodeError::Panicked`]. The panic's message still goes to the
-/// panic hook (stderr by default).
+/// panic hook (stderr by default), which can tell it is a decode's from [`in_decode`].
 pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, DecodeError>) -> Result<T, DecodeError> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(Err(DecodeError::Panicked))
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _decoding = budget::Decoding::enter();
+        f()
+    }))
+    .unwrap_or(Err(DecodeError::Panicked))
+}
+
+/// Whether the calling thread is running a decode: inside [`decode`], [`decode_with_progress`],
+/// [`probe`] or [`PsdLayers::decode_layer`], or one of the threads they hand work to. For a panic
+/// hook that aborts on every panic but a decode's, which the crate turns into
+/// [`DecodeError::Panicked`] (FD7): 3D Review's viewer aborts loudly on its own bugs, and a
+/// crafted file is just a file that didn't open. The hook runs before the panic unwinds, so this
+/// is still `true` there.
+pub fn in_decode() -> bool {
+    budget::decoding()
 }
 
 fn decode_inner(
@@ -3507,6 +3521,27 @@ mod tests {
         let r: Result<(), DecodeError> = guarded(|| panic!("a decoder bug"));
         assert!(matches!(r, Err(DecodeError::Panicked)));
         assert!(guarded(|| Ok(1)).is_ok());
+    }
+
+    /// A panic hook can tell a decode's panic from any other, on the decode's own thread and on
+    /// the helpers its passes run on.
+    #[test]
+    fn in_decode_covers_the_decode_and_its_helpers() {
+        assert!(!in_decode());
+        let seen = std::sync::atomic::AtomicBool::new(true);
+        guarded(|| {
+            assert!(in_decode());
+            let mut buf = vec![0u8; 16 << 20];
+            par_chunks_mut(&mut buf, 4, |_, _| {
+                if !in_decode() {
+                    seen.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert!(seen.into_inner());
+        assert!(!in_decode());
     }
 
     /// Corrupt input must surface an error, never panic (FFI-free path, but the viewer

@@ -41,6 +41,30 @@ thread_local! {
     /// This thread's cap on a pass's threads, itself included; 0 = none. Set for a decode from
     /// `DecodeOptions::max_threads`.
     static CAP: Cell<usize> = const { Cell::new(0) };
+    /// How many decodes this thread is inside: [`Decoding`] guards, or 1 for a helper thread.
+    static DECODING: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Marks the calling thread as running a decode for as long as it lives (FD7's
+/// [`in_decode`](crate::in_decode)).
+pub(crate) struct Decoding(());
+
+impl Decoding {
+    pub(crate) fn enter() -> Decoding {
+        DECODING.set(DECODING.get() + 1);
+        Decoding(())
+    }
+}
+
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        DECODING.set(DECODING.get().saturating_sub(1));
+    }
+}
+
+/// Whether the calling thread is inside a decode, or is one of a decode's helper threads.
+pub(crate) fn decoding() -> bool {
+    DECODING.get() > 0
 }
 
 /// The calling thread's own place in the budget, held for one decode. A thread that is already
@@ -140,6 +164,7 @@ pub(crate) fn with_cap<R>(n: usize, f: impl FnOnce() -> R) -> R {
 fn as_helper(work: impl FnOnce()) {
     SEATED.set(true);
     CAP.set(1);
+    DECODING.set(1);
     work();
 }
 

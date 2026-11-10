@@ -507,6 +507,7 @@ impl PsdLayers {
         // The calling thread is one of the budget's for the whole decode (FD8).
         let _seat = crate::budget::Seat::take();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _decoding = crate::budget::Decoding::enter();
             self.decode_inner(info, opts, ctl)
         }))
         .unwrap_or_else(|_| {
