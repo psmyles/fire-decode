@@ -1,7 +1,7 @@
 # fire-decode - Work Plan
 
 **Status, 10 November 2026:** the crate lives here now (step 1's Mac part), the repository is public,
-and steps 2a to 6c are done on a Mac. fire, 3D Review and bite each build on it on a `fire-decode`
+and steps 2a to 6 are done on a Mac. fire, 3D Review and bite each build on it on a `fire-decode`
 branch, which merges when they move to the first tag. Everything that needs Windows is collected in
 "Needs Windows", kept current as the Mac work goes, to be done in one stretch afterwards.
 
@@ -205,10 +205,14 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
     - the three iPhone photos within 0.3% of ImageIO's HDR decode;
     - `Sdr` unchanged (the SDR default), SDR HEIC TTFP within noise.
 
-11. **Next on the Mac, in the plan's order.** Each works on a branch through the same `[patch]`;
-    its gate's Windows half joins "Needs Windows":
-    - **6d:** sequences (FD18), with HEIF progress and cancel in fire's loading bar;
-    - **step 7:** the `mips` feature.
+11. **Step 6d, sequences - done on the Mac** (10 November 2026): the crate in `main`
+    (`3f62b4b`), fire on its branch (`94bc48e`). The plan's FD18 has it as built and
+    [`baselines.md`](baselines.md) the gate: the infinite loop ends, truncation is flagged,
+    progress only rises, and a cancel stops a long sequence. fire plays a sequence's loop count
+    and cancels a decode its window has moved on from.
+
+12. **Next on the Mac:** **step 7**, the `mips` feature (FD11): fire uses it, 3D Review builds
+    chains on its workers and settles `rhi/mips.rs`'s place in the UV-checker bake.
 
 The gates are in `fire-decode-plan.md` §5. On a Mac only their macOS halves can pass, so record each
 gate as "macOS passed; Windows pending".
@@ -305,14 +309,16 @@ The Windows stretch, in order. Each item names what it unblocks.
       some soft-edged transparency, saved with Maximize Compatibility. Compare Photoshop's view
       with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
       matte that the crate should divide out (plan §6, PSD)?
-13. **Steps 6a to 6c's Windows half** (fire's `fire-decode` branch):
+13. **Step 6's Windows half** (fire's `fire-decode` branch):
     - **The regenerated HLSL compiles** (`fxc`, in fire's build) and the viewer draws an EXR and a
       PQ file through both tone curves on Direct3D 11;
     - **fire's TTFP** on the three iPhone HEICs and `grid_iphone.heic` against step 3's, within 2%;
     - **fire-shellext** thumbnails `pq_lossless.avif` as SDR (203 cd/m² white, not the flat raw
       signal);
     - **an iPhone HEIC in HDR mode** (`H`) renders brighter highlights than its SDR base on
-      Direct3D 11, and `H` again returns to the base.
+      Direct3D 11, and `H` again returns to the base;
+    - **`seq_hevc.heif` plays three times and stops**, `seq_infinite.avif` loops, and navigating
+      away from `seq_over_cap.avif` mid-decode frees the pool at once.
 
 ## References
 

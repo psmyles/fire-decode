@@ -558,3 +558,19 @@ file, which was an error before.
 new work is one parse of the `meta` box.
 
 **fire:** 202 tests (200 without `heif`), clippy clean.
+
+## Step 6d on macOS: sequences
+
+10 November 2026. This repository at `3f62b4b`; fire's `fire-decode` branch at `94bc48e`.
+
+- **Fixtures** (`tests/heif_fixtures.rs`, `frames: All`): `seq_infinite.avif` and `seq_only.avif`
+  give their 8 frames at 100 ms, loop count `None`; `seq_hevc.heif` its 6 at 40 ms, loop count 3.
+  Every frame's colour is within 6% of `expected.json`. The infinitely looping file ends after
+  its 8 frames. `frames: First` gives the still (or the sequence-only file's first frame).
+- **Truncation:** `seq_over_cap.avif` (17 frames of 4096²) keeps 16 at the 1 GiB cap, flagged, in
+  606 ms with `viewer()` (checked once: the test uses a 256 MiB budget and keeps 4).
+- **Progress and cancel:** progress through `seq_hevc.heif` only rises, frame by frame, to 1. A
+  cancel raised after the first frame of `seq_over_cap.avif` returns `Cancelled`.
+- **Nothing else moved:** `texture()` / `thumbnail()` output identical to 6c on all 137 files.
+- **The crate's suite** passes under all four CI sets (175 / 198 / 225 / 236), clippy clean. fire:
+  203 tests (201 without `heif`), clippy clean; both sequences open in its release build.
