@@ -1,81 +1,101 @@
 Vendored static libraries for heif-sys
 =======================================
 
-This directory holds prebuilt static libraries + public headers for the HEIF/AVIF decode
-stack, so `cargo build` works with no native package manager or build tooling (no vcpkg /
-cmake / meson / nasm) on the developer's machine. Only the linked-in machine code reaches
-the shipped binary; the rest is dead-stripped by the linker at release time.
+This directory holds prebuilt static libraries and public headers for the HEIF / AVIF decode
+stack, so `cargo build` works with no native package manager or build tooling (no vcpkg, cmake,
+meson or nasm). The libraries are committed as plain files: cargo's git dependencies don't fetch
+Git LFS objects (fire-decode plan, FD16).
+
+Every re-vendor adds a copy of the libraries to every consumer's clone. So re-vendors are
+deliberate, not routine, and each target's libraries change in one commit.
 
 Layout: one directory per vendored target
 -----------------------------------------
-  x64-windows/     MSVC x64 static libs  (triplet x64-windows-static-md)
-  arm64-macos/     Apple Silicon static libs (triplet arm64-osx)
+  arm64-macos/     Apple Silicon static libs   (overlay triplet arm64-osx-fire-decode)
+  x64-windows/     MSVC x64 static libs, /MT    (overlay triplet x64-windows-fire-decode) - NOT YET
+  triplets/        the two overlay triplets
 
-Each holds BOTH `include/` and `lib/` from the same vcpkg run. The headers are per-target,
-not shared: the two targets are not necessarily at the same upstream libheif version, and
-bindgen must parse the headers that match the libs it will link. build.rs picks a directory
-from CARGO_CFG_TARGET_OS/ARCH and fails with a named error on any other target.
+Each target directory holds both `include/` and `lib/` from the same vcpkg run. build.rs picks one
+from the target and fails with a named compile_error! on any other target, or on Windows without
+the static CRT (FD20).
 
 Contents
 --------
-  x64-windows/lib/heif.lib        libheif  1.23.0  (HEIF/AVIF container + API, C++) [LGPL-3.0-only]
-  x64-windows/lib/libde265.lib    libde265 1.1.1   (HEVC decoder, for HEIC/HEIF, C++)[LGPL-3.0-only]
-  x64-windows/lib/dav1d.lib       dav1d            (AV1 decoder, for AVIF, C)        [BSD-2-Clause]
-  arm64-macos/lib/libheif.a       libheif  1.23.2  (same, arm64)                     [LGPL-3.0-only]
-  arm64-macos/lib/libde265.a      libde265         (same, arm64)                     [LGPL-3.0-only]
-  arm64-macos/lib/libdav1d.a      dav1d            (same, arm64)                     [BSD-2-Clause]
-  <target>/include/libheif/*      libheif public C headers for that target
+One vcpkg baseline for both targets:
+  microsoft/vcpkg e529425f2f43d773d0a59517c8d89367d68bb7fd (2026-11-10), vcpkg tool 2026-10-29.
 
-Version drift: Windows is at libheif 1.23.0 and macOS at 1.23.2, because they were vendored
-from different vcpkg baselines. The differences are additive (new HDR-metadata APIs, mostly in
-the unused C++ header) and none touch the C API `wrapper.c` calls, but converge them on the
-next re-vendor of either side.
+  arm64-macos (built 10 November 2026, Apple clang from Xcode on macOS 27.2):
+    lib/libheif.a    libheif  1.23.7   HEIF / AVIF container + API, C++      LGPL-3.0-or-later
+    lib/libde265.a   libde265 1.1.3    HEVC decoder, for HEIC / HEIF, C++    LGPL-3.0-or-later
+    lib/libdav1d.a   dav1d    1.5.4    AV1 decoder, for AVIF, C              BSD-2-Clause
+    include/libheif/ libheif 1.23.7's public headers
 
-How these were produced (one-time, on a machine with vcpkg)
-----------------------------------------------------------
-The stock vcpkg libheif port offers AVIF only via aom (large, slower decode) and pulls the
-x265 ENCODER via its default `hevc` feature. We want AVIF via dav1d (small, fast) and no
-encoders, so patch the local port before installing:
+  x64-windows: still the old stack in fire's tree (libheif 1.23.0, dav1d 1.5.3, /MD). To be
+  re-vendored on Windows from the same baseline with x64-windows-fire-decode.
 
-  1. ports/libheif/vcpkg.json    : add "dav1d" to the top-level "dependencies" array.
-  2. ports/libheif/portfile.cmake: change  -DWITH_DAV1D=OFF  ->  -DWITH_DAV1D=ON
-  3. ports/libheif/portfile.cmake: add     -DENABLE_PLUGIN_LOADING=OFF
-     REQUIRED ON macOS, harmless on Windows. libheif's CMake defaults ENABLE_PLUGIN_LOADING
-     to ON, and where the platform supports it dav1d is then built as a *separate dynamic
-     plugin* (plugins/libheif/libheif-dav1d.so) instead of being compiled into libheif. In a
-     static build that plugin is unreachable, and the failure is silent: libheif.a links fine
-     and carries no dav1d references at all, so every AVIF simply fails to decode at runtime.
-     Verify after building:  nm -u lib/libheif.a | grep -c dav1d   (must be > 0)
-  4. Build (the [core] feature set drops the default x265 encoder):
-       Windows:  vcpkg install "libheif[core]:x64-windows-static-md"
-       macOS:    vcpkg install "libheif[core]:arm64-osx"
-     vcpkg auto-acquires the nasm/meson/ninja that dav1d needs.
+libheif's and libde265's sources say "version 3 of the License, or (at your option) any later
+version", so LGPL-3.0-or-later. vcpkg's port metadata says LGPL-3.0-only; the sources decide.
 
-Then copy `installed/<triplet>/include/libheif` and the three libs from
-`installed/<triplet>/lib` into this directory's target subdirectory.
+How these were produced
+-----------------------
+No port patches are needed at this baseline: the libheif port has `dav1d` and `libde265` features,
+and for static builds it already compiles dav1d into libheif rather than as a plugin. The overlay
+triplet carries the rest:
+  - release only;
+  - static libraries;
+  - macOS 11.0 (VCPKG_OSX_DEPLOYMENT_TARGET), which fire, 3D Review and bite all support;
+  - Windows /MT (VCPKG_CRT_LINKAGE static), FD20;
+  - -DENABLE_PLUGIN_LOADING=OFF for libheif. Plugin loading would be a planted-library risk in a
+    COM surrogate or the Quick Look sandbox (FD16).
 
-Stripping (Windows only — why those libs are ~52 MB, not ~220 MB)
-------------------------------------------------------------------
-vcpkg's release build on MSVC embeds CodeView debug info (/Z7) directly in the .obj files,
-which balloons heif.lib to ~194 MB. The debug info is useless in a vendored lib (and Rust
-strips it from release binaries anyway), so it is removed with llvm-objcopy:
+  git clone https://github.com/microsoft/vcpkg && cd vcpkg
+  git checkout e529425f2f43d773d0a59517c8d89367d68bb7fd
+  ./bootstrap-vcpkg.sh -disableMetrics          (bootstrap-vcpkg.bat on Windows)
+  ./vcpkg install "libheif[core,dav1d,libde265]:arm64-osx-fire-decode" \
+      --overlay-triplets=<this directory>/triplets --binarysource=clear
+  (Windows: "libheif[core,dav1d,libde265]:x64-windows-fire-decode")
 
-       llvm-objcopy --strip-debug heif.lib     heif.lib
-       llvm-objcopy --strip-debug dav1d.lib    dav1d.lib
-       llvm-objcopy --strip-debug libde265.lib libde265.lib
+`[core,dav1d,libde265]` leaves out the default `hevc` feature, the x265 encoder: no encoders at all.
+`--binarysource=clear` builds everything from source. vcpkg fetches the nasm, meson and ninja that
+dav1d needs.
 
-This only drops .debug$S/.debug$T sections; code, symbols, and the /DEFAULTLIB directives
-(which auto-link the MSVC C++ runtime for libheif/libde265) are preserved. The arm64-osx
-release build carries no such debug info — those .a files are ~6 MB as produced.
+Then copy `installed/<triplet>/include/libheif` and the three libraries from
+`installed/<triplet>/lib` into the target's directory here.
+
+Checks after each re-vendor (all passed for arm64-macos on 10 November 2026)
+---------------------------------------------------------------------------
+  libheif references its codecs:  nm -u lib/libheif.a | grep -c dav1d      (> 0; 10 here)
+                                  nm -u lib/libheif.a | grep -c de265      (> 0; 26 here)
+  no plugin loading:              nm -u lib/libheif.a | grep -c dlopen     (0)
+                                  strings lib/libheif.a | grep -c LIBHEIF_PLUGIN_PATH   (0)
+                                  (Windows: no LoadLibrary import from libheif)
+  no encoders:                    nm lib/libheif.a | grep -c -i x265_      (0)
+  macOS deployment target:        otool -l lib/*.a | grep -A4 LC_BUILD_VERSION | grep minos
+                                                                             (11.0 for all three)
+  Windows CRT:                    the libraries carry /DEFAULTLIB:LIBCMT, not MSVCRT
+  gain-map API (FD17):            grep -i -E "gain.?map|tmap|21496" include/libheif/*.h
+                                                                             (none in 1.23.7)
+
+Stripping (Windows only)
+------------------------
+vcpkg's release build on MSVC embeds CodeView debug info (/Z7) in the .obj files, which balloons
+heif.lib to ~194 MB. Remove it with llvm-objcopy; code, symbols and /DEFAULTLIB directives stay:
+
+       llvm-objcopy --strip-debug heif.lib
+       llvm-objcopy --strip-debug dav1d.lib
+       llvm-objcopy --strip-debug libde265.lib
+
+The arm64-macos release build carries no such debug info; those .a files are ~6.4 MB as produced.
 
 Linking
 -------
-Windows: the MSVC objects embed /DEFAULTLIB directives for the C++ runtime libheif and
-libde265 need, so it links itself and build.rs must not name it.
-macOS: Mach-O has no equivalent, so build.rs names `c++` explicitly or libheif's and
-libde265's C++ symbols go unresolved.
+Windows: the MSVC objects embed /DEFAULTLIB directives for the C++ runtime libheif and libde265
+need, so it links itself and build.rs must not name it.
+macOS: Mach-O has no equivalent, so build.rs names `c++` explicitly, or libheif's and libde265's
+C++ symbols go unresolved.
 
-Updating
---------
-Re-run the recipe above against a newer vcpkg, re-strip (Windows), and replace the files in
-that target's subdirectory. Keep the triplets at x64-windows-static-md / arm64-osx.
+History
+-------
+fire vendored an earlier build of this stack under its own crates/heif-sys/vendor (libheif 1.23.0
+on Windows, 1.23.2 on macOS, built for macOS 27.0). Those binaries stay in fire's history for its past releases'
+notices; this repository's history was rewritten without them, and starts from this re-vendor.
