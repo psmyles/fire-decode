@@ -47,7 +47,7 @@ Steps 2b and 6 test against it. It also records the libheif and encoder versions
 | Gain maps | `gainmap_iso.heic`, `gainmap_iso_portrait.heic` | ISO 21496-1 (`tmap`), from an HDR picture whose patch `b` is 4× SDR white | 6c |
 | | `gainmap_iso_tmap_primary.heic` | `gainmap_iso.heic` with `pitm` on the `tmap` item. libheif 1.23.6 can't decode it as primary | 6c, FD17 fallback |
 | | `gainmap_apple.heic`, `gainmap_apple_portrait.heic` | Apple's HDR gain map, half size, headroom 4 in its XMP: full gain on patch `a`, 128 on `b` | 6c |
-| | `gainmap_apple_portrait_unrotated_map.heic` | The portrait with the gain map's `irot` dropped, the layout FD17 says iPhones use | 6c |
+| | `gainmap_apple_portrait_unrotated_map.heic` | The portrait with the gain map's `irot` dropped: it must render the same, since the gain map's own transforms are ignored (FD17) | 6c |
 | | `gainmap_both.heic` | ISO and Apple maps that disagree: ISO brightens `b`, Apple's `a` | 6c, "ISO wins" |
 | Malformed | `bad_truncated_mdat`, `bad_truncated_meta`, `bad_iloc_past_eof`, `bad_hvcC`, `bad_grid_tiles`, `bad_not_heif`, `bad_ftyp_only` (`.heic`), `bad_av1_data.avif` | Each fails in libheif. The crate must return an error, never abort | 2b |
 | Oversized | `big_ispe_40000.{heic,avif}`, `big_ispe_200000.heic` | `ispe` claims more than the coded 256×192 | 2b size guard |
@@ -61,7 +61,7 @@ what they claim.
 
 These bear on the plan:
 
-- **Gain-map orientation (FD17).**
+- **Gain-map orientation (FD17, which now follows this).**
   - In ImageIO's ISO portrait, the base carries `irot 270` and is stored 256×192. The gain map is
     stored the same way (128×96) with `irot 0`. The `tmap` item has the rotated size (192×256) and
     `irot 0`.
@@ -69,6 +69,8 @@ These bear on the plan:
     Applying the *displayed* (`tmap`) item's transforms would leave this file unrotated.
   - For Apple's map, ImageIO writes `irot` on the gain map too, and renders the same with or without
     it.
+  - Real iPhone portraits (below) do the same: gain map stored like the base, `tmap` rotated in size
+    with `irot 0`.
 - **ISO wins.** In `gainmap_both.heic`, ImageIO applies the ISO map and ignores Apple's.
 - **Apple's reference values.** ImageIO renders full gain at headroom 4 as 4.003, and gain 128 as
   1.663. That is `1 + 3g` with `g` ≈ 0.22, close to 128 decoded through the sRGB curve.
@@ -80,11 +82,27 @@ These bear on the plan:
   other way.
 - **Zeroing `av1C` is no error:** AV1 decoders read their configuration from the bitstream.
 
+## Real iPhone photos
+
+Three iPhone HEICs in bite's local `test_images` (not committed: they are photos) were read for
+their layout. They show the following.
+
+- **Both gain maps in every photo.** Apple's `hdrgainmap` auxiliary image (a grid at half size),
+  and an ISO `tmap` item in an `altr` group. The `tmap` item takes Apple's gain-map image as its
+  input, so the two maps share pixels.
+- **The portrait:**
+  - `irot 270` on the base, on the gain map and on every other auxiliary image (sky matte, linear
+    thumbnail, style delta map);
+  - `irot 0` on `tmap`, which has the rotated size.
+- **Grids:** 512 px tiles at 12 MP (8×6). At 48 MP, 640×896 tiles (9×5).
+- **Other auxiliary images** a decoder must skip: `semanticskymatte`, `linearthumbnail` and
+  `styledeltamap`, plus a styles `uri ` metadata item.
+
 ## Not here
 
 These belong in the local corpus, outside the repository, because they're photos or not ours to
 redistribute:
-- real iPhone HDR photos (Apple's MakerNote headroom, and its real gain-map layout);
+- real iPhone HDR photos, beyond the three above (Apple's MakerNote headroom among them);
 - Android ISO-gain-map AVIFs;
 - ICC-tagged HEICs;
 - large real photos for timing.

@@ -901,8 +901,8 @@ def build_gainmaps(tmp, build):
     for name, mode, portrait, gain_values in cases:
         sdr, hdr, rects, h, w = gainmap_sources(portrait)
         if mode == "derived":
-            # ImageIO gives Apple's gain map the base's irot. FD17 says an iPhone's usually has
-            # none, so this copy drops it: base and map are stored alike, only the base says turn.
+            # ImageIO, like an iPhone, gives Apple's gain map the base's irot. This copy drops it:
+            # the map's own transforms are ignored (FD17), so it must render the same.
             if build:
                 b = (HERE / "gainmap_apple_portrait.heic").read_bytes()
                 aux_id = next(i for i, urn in aux_types(b).items() if urn == APPLE_GAIN_MAP)

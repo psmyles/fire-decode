@@ -42,10 +42,11 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
        the animation cap and two grid bombs.
      - `make.py` rebuilds and checks them; `expected.json` is what a decoder must return.
      - The gain maps come from ImageIO, with ImageIO's own HDR decode recorded as the reference.
-     - The README lists what building them showed. One finding bears on FD17's transform order:
-       ImageIO's ISO portrait has to be turned by the base's `irot`, since its `tmap` item has none.
-     - **Still to collect, for the local corpus:** real iPhone HDR photos (one portrait), an Android
-       ISO-gain-map AVIF, and ICC-tagged HEICs. They stay out of the repository.
+     - The README lists what building them showed. FD17's transform order was changed to match:
+       composite in stored orientation, then apply the base's transforms. Three real iPhone photos
+       agree: bite's `test_images/IMG_2131`, `IMG_2135` and `IMG_2139.HEIC`, the last a portrait.
+     - **Still to collect, for the local corpus:** an Android ISO-gain-map AVIF and ICC-tagged HEICs.
+       They stay out of the repository.
    - **Record macOS baselines:** fire TTFP per format (fire's `scripts/ttfp.sh`), plus 3D Review's
      startup gate and binary sizes. 3D Review's Windows baselines are done (its `docs/PLAN.md`).
    - **bite's baselines:** cold and warm import by format, counting `magick` processes.
