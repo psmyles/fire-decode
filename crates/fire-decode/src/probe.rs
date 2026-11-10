@@ -318,9 +318,16 @@ mod heif {
             pos += size;
         }
         if let Some(meta) = &meta
-            && let Some(d) = primary_dims(meta)?
+            && let Some((w, h, kind)) = primary_dims(meta)?
         {
-            return Ok(d);
+            // A gain map, where the colour box says nothing HDR (FD17). A `tmap` primary is one
+            // whatever its colour box says: that describes the HDR alternate, often as PQ, while
+            // what is shown is the SDR base.
+            let parsed = crate::heif_meta::Meta::parse(meta).ok();
+            let gain_map = parsed.as_ref().is_some_and(|m| {
+                m.tmap_primary_base().is_some() || (kind == HdrKind::None && m.has_gain_map())
+            });
+            return Ok((w, h, if gain_map { HdrKind::GainMap } else { kind }));
         }
         match &moov {
             Some(moov) => track_dims(moov).map(|(w, h)| (w, h, HdrKind::None)),

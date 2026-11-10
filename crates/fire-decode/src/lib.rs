@@ -62,7 +62,10 @@ mod downscale;
 mod exif;
 mod format;
 #[cfg(feature = "heif")]
+mod gainmap;
+#[cfg(feature = "heif")]
 mod hdr;
+mod heif_meta;
 #[cfg(feature = "icc")]
 mod icc;
 mod narrow;
@@ -163,7 +166,7 @@ impl Cx<'_> {
         (self.cancel)()
     }
 
-    fn check_cancel(&self) -> Result<(), DecodeError> {
+    pub(crate) fn check_cancel(&self) -> Result<(), DecodeError> {
         if self.cancelled() {
             Err(DecodeError::Cancelled)
         } else {
@@ -750,7 +753,12 @@ fn decode_inner(
     // A float buffer is linear light (OpenEXR, Radiance HDR, float TIFF, 32-bit PSD, PFM); say so
     // before narrowing can turn it into bytes. Not a PQ / HLG source decoded to light: its file is
     // still the integer signal its nclx box describes.
-    if img.format.is_hdr() && !matches!(img.source.hdr, HdrKind::Pq | HdrKind::Hlg) {
+    if img.format.is_hdr()
+        && !matches!(
+            img.source.hdr,
+            HdrKind::Pq | HdrKind::Hlg | HdrKind::GainMap
+        )
+    {
         img.source.sample = Sample::Float;
         if img.source.transfer == Transfer::Srgb {
             img.source.transfer = Transfer::Linear;
@@ -1148,6 +1156,44 @@ fn decode_exr(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
 fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, DecodeError> {
     use heif_sys::HeifError;
     const MAX_ICC_LEN: usize = 16 << 20;
+    // The boxes libheif has no API for (gain maps, FD17), read once here.
+    let found = heif_meta::find_meta(bytes);
+    let meta = found.and_then(|(m, _)| heif_meta::Meta::parse(m).ok());
+    // A `tmap` primary, which libheif can't open: point `pitm` at its SDR base, in a copy.
+    let patched;
+    let bytes = match (&meta, found) {
+        (Some(m), Some((_, meta_at))) => match (m.tmap_primary_base(), m.pitm_field()) {
+            (Some(base), Some((field, width))) if width == 4 || base <= u16::MAX as u32 => {
+                let mut copy = bytes.to_vec();
+                let at = meta_at + field;
+                if width == 2 {
+                    copy[at..at + 2].copy_from_slice(&(base as u16).to_be_bytes());
+                } else {
+                    copy[at..at + 4].copy_from_slice(&base.to_be_bytes());
+                }
+                patched = copy;
+                &patched[..]
+            }
+            _ => bytes,
+        },
+        _ => bytes,
+    };
+    let base = meta
+        .as_ref()
+        .and_then(|m| m.tmap_primary_base().or(m.primary));
+    let gain_map = meta
+        .as_ref()
+        .zip(base)
+        .and_then(|(m, b)| m.gain_map(b).map(|g| (b, g)));
+    // Under `Linear` a gain-map photo renders as HDR. A gain map that can't be read leaves the
+    // SDR base, as `Sdr` shows it; a cancel or a refusal on size stands.
+    if let (Hdr::Linear, Some(m), Some((b, g))) = (cx.opts.hdr, &meta, gain_map) {
+        match gainmap::render(bytes, m, b, g, format, cx) {
+            Ok(img) => return Ok(img),
+            Err(e @ (DecodeError::Cancelled | DecodeError::TooLarge(_))) => return Err(e),
+            Err(_) => {}
+        }
+    }
     let lim = cx.limits();
     let limits = heif_sys::Limits {
         max_dim: lim.max_dim,
@@ -1211,6 +1257,9 @@ fn decode_heif(bytes: &[u8], format: Format, cx: &Cx) -> Result<DecodedImage, De
     if let Some(nclx) = nclx {
         (source.transfer, source.primaries, source.hdr) =
             source::from_nclx(nclx.transfer_characteristics, nclx.colour_primaries);
+    }
+    if gain_map.is_some() && source.hdr == HdrKind::None {
+        source.hdr = HdrKind::GainMap;
     }
     let mut img = DecodedImage {
         pixels: img.pixels,

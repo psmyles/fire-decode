@@ -105,10 +105,7 @@ fn check_corners(name: &str, img: &DecodedImage, corners: &Value, tolerance: f32
 
 /// Fixtures whose expectation a later step meets, with the step. They are checked to still fail,
 /// so the list can't go stale once the step lands.
-const PENDING: &[(&str, &str)] = &[(
-    "gainmap_iso_tmap_primary.heic",
-    "step 6c: a tmap primary falls back through the altr group to the SDR base (FD17)",
-)];
+const PENDING: &[(&str, &str)] = &[];
 
 #[test]
 fn every_fixture_decodes_or_fails_as_expected_json_says() {
@@ -353,5 +350,79 @@ fn probe_reports_pq_and_hlg() {
         let file = std::fs::File::open(fixtures().join(name)).unwrap();
         let p = fire_decode::probe(std::io::BufReader::new(file), name.rsplit('.').next()).unwrap();
         assert_eq!(p.hdr, kind, "{name}");
+    }
+}
+
+/// Step 6c's gate (FD17): under `Linear` each gain-map fixture renders as ImageIO renders it at
+/// full headroom, its patches within 3% (the gain maps are lossy and half size). ISO wins when
+/// both maps are present; the portraits come out turned by the base's `irot` alone.
+#[test]
+fn gain_maps_render_as_imageio_does() {
+    let mut opts = DecodeOptions::inspect();
+    opts.hdr = Hdr::Linear;
+    let files = expected();
+    for name in [
+        "gainmap_iso.heic",
+        "gainmap_iso_portrait.heic",
+        "gainmap_iso_tmap_primary.heic",
+        "gainmap_apple.heic",
+        "gainmap_apple_portrait.heic",
+        "gainmap_apple_portrait_unrotated_map.heic",
+        "gainmap_both.heic",
+    ] {
+        // The tmap-primary copy and the unrotated-map portrait render as the files they were
+        // made from, whose expectations they borrow.
+        let reference = match name {
+            "gainmap_iso_tmap_primary.heic" => "gainmap_iso.heic",
+            "gainmap_apple_portrait_unrotated_map.heic" => "gainmap_apple_portrait.heic",
+            n => n,
+        };
+        let e = &files[reference];
+        let img = decode_with(name, &opts).unwrap_or_else(|err| panic!("{name}: {err}"));
+        assert_eq!(img.format, PixelFormat::Rgba16Float, "{name}");
+        assert_eq!(img.source.hdr, HdrKind::GainMap, "{name}");
+        let size = |k: &str| e[k].as_u64().unwrap() as u32;
+        assert_eq!(
+            (img.width, img.height),
+            (size("width"), size("height")),
+            "{name}"
+        );
+        check_corners(name, &img, &e["corners"], 1.0);
+        for (patch, p) in files[reference]["patches"].as_object().unwrap() {
+            let at = |k: &str| p[k].as_u64().unwrap() as usize;
+            let (x, y) = (at("x") + at("size") / 2, at("y") + at("size") / 2);
+            let got = pixel(&img, x, y);
+            for c in 0..3 {
+                let want = p["imageio_hdr"][c].as_f64().unwrap() as f32;
+                assert!(
+                    (got[c] - want).abs() <= 0.03 * want.max(1.0),
+                    "{name}: patch {patch} channel {c} is {}, ImageIO {want}",
+                    got[c]
+                );
+            }
+        }
+    }
+}
+
+/// Under `Sdr` a gain-map photo is its base, as before 6c (the corpus comparison in
+/// `docs/baselines.md` checks the pixels), with its kind reported; a `tmap` primary shows the
+/// base its `altr` group offers; and `probe()` names the kind before decoding.
+#[test]
+fn gain_map_photos_stay_sdr_by_default() {
+    let iso = decode_with("gainmap_iso.heic", &DecodeOptions::inspect()).unwrap();
+    for name in [
+        "gainmap_iso.heic",
+        "gainmap_apple.heic",
+        "gainmap_iso_tmap_primary.heic",
+    ] {
+        let img = decode_with(name, &DecodeOptions::inspect()).unwrap();
+        assert_eq!(img.format, PixelFormat::Rgba8Unorm, "{name}");
+        assert_eq!(img.source.hdr, HdrKind::GainMap, "{name}");
+        if name == "gainmap_iso_tmap_primary.heic" {
+            assert_eq!(img.pixels, iso.pixels, "{name}: not the ISO file's base");
+        }
+        let file = std::fs::File::open(fixtures().join(name)).unwrap();
+        let p = fire_decode::probe(std::io::BufReader::new(file), Some("heic")).unwrap();
+        assert_eq!(p.hdr, HdrKind::GainMap, "{name}");
     }
 }

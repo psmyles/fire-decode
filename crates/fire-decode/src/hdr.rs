@@ -128,6 +128,55 @@ pub(crate) fn convert(img: &mut DecodedImage, hdr: Hdr, cx: &Cx) -> Result<(), D
     Ok(())
 }
 
+/// RGB -> XYZ (D65) for an ICC matrix-shaper profile, from its `rXYZ` / `gXYZ` / `bXYZ`
+/// colorants: the D50-adapted PCS values, adapted back to D65 with Bradford, as a colour-managed
+/// viewer does. `None` for a profile that isn't RGB to XYZ with all three colorants. What an
+/// iPhone's Display P3 base needs, which describes its colour by ICC, not nclx.
+pub(crate) fn icc_rgb_to_xyz(icc: &[u8]) -> Option<Mat> {
+    if icc.get(16..20)? != b"RGB " || icc.get(20..24)? != b"XYZ " {
+        return None;
+    }
+    let be32 = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(icc.get(at..at + 4)?.try_into().ok()?))
+    };
+    let count = be32(128)? as usize;
+    let colorant = |sig: &[u8; 4]| -> Option<[f64; 3]> {
+        let entry = (0..count.min(1024))
+            .map(|i| 132 + i * 12)
+            .find(|&e| icc.get(e..e + 4) == Some(&sig[..]))?;
+        let at = be32(entry + 4)? as usize;
+        if icc.get(at..at + 4)? != b"XYZ " {
+            return None;
+        }
+        let fixed = |o: usize| -> Option<f64> { Some(be32(at + 8 + o)? as i32 as f64 / 65536.0) };
+        Some([fixed(0)?, fixed(4)?, fixed(8)?])
+    };
+    let [r, g, b] = [colorant(b"rXYZ")?, colorant(b"gXYZ")?, colorant(b"bXYZ")?];
+    let d50: Mat = std::array::from_fn(|i| [r[i], g[i], b[i]]);
+    // Bradford, D50 to D65.
+    const BRADFORD: Mat = [
+        [0.955_576_6, -0.023_039_3, 0.063_163_6],
+        [-0.028_289_5, 1.009_941_6, 0.021_007_7],
+        [0.012_298_2, -0.020_483, 1.329_909_8],
+    ];
+    Some(mul(&BRADFORD, &d50))
+}
+
+/// A linear RGB -> RGB matrix between two spaces given as RGB -> XYZ.
+pub(crate) fn between(from: &Mat, to: &Mat) -> [[f32; 3]; 3] {
+    mul(&invert(to), from).map(|row| row.map(|v| v as f32))
+}
+
+/// The sRGB transfer, decoded: stored 0..1 to linear light. SDR bases use it (Display P3's
+/// curve is sRGB's).
+pub(crate) fn srgb_decode(v: f32) -> f32 {
+    if v <= 0.040_45 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// SMPTE ST 2084: signal (0..1) to absolute light, cd/m².
 fn pq_eotf(e: f64) -> f64 {
     const M1: f64 = 2610.0 / 16384.0;
@@ -171,10 +220,10 @@ fn chromaticities(p: Primaries) -> [(f64, f64); 3] {
     }
 }
 
-type Mat = [[f64; 3]; 3];
+pub(crate) type Mat = [[f64; 3]; 3];
 
 /// RGB -> XYZ for the primaries, with D65 white (all three share it).
-fn rgb_to_xyz(p: Primaries) -> Mat {
+pub(crate) fn rgb_to_xyz(p: Primaries) -> Mat {
     let xyz = |(x, y): (f64, f64)| [x / y, 1.0, (1.0 - x - y) / y];
     let [r, g, b] = chromaticities(p).map(xyz);
     let m = [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]];
@@ -194,7 +243,7 @@ fn luminance(p: Primaries) -> [f32; 3] {
     rgb_to_xyz(p)[1].map(|v| v as f32)
 }
 
-fn mul(a: &Mat, b: &Mat) -> Mat {
+pub(crate) fn mul(a: &Mat, b: &Mat) -> Mat {
     std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
 }
 
@@ -202,7 +251,7 @@ fn mul_vec(a: &Mat, v: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|i| (0..3).map(|k| a[i][k] * v[k]).sum())
 }
 
-fn invert(m: &Mat) -> Mat {
+pub(crate) fn invert(m: &Mat) -> Mat {
     let [[a, b, c], [d, e, f], [g, h, i]] = *m;
     let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
     [
