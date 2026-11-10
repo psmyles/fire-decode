@@ -205,3 +205,23 @@ The two made files:
   8192x8192 big_rgba8_8192.psd`.
 
 No PSD is slower. The raw launches are in `local/ttfp-macos-step2a.csv`.
+
+## Decoder updates on macOS
+
+10 November 2026: exr 1.74.0 → 1.74.3, lcms2 6.1.1 → 6.2.0 (lcms2-sys 4.0.6 → 4.0.7), zune-core
+0.5.1 → 0.5.3, bcdec_rs 0.2.0 → 0.2.1, flate2 1.1.9 → 1.1.11, and their compatible dependencies
+([`decoders.md`](decoders.md)). fire was built on them, with steps 1 and 2a, in the same scratch
+clone. Its tests passed (194), and so did all of this workspace's (198).
+
+TTFP against the baseline binary, 12 launches each, all 17 files: every format within -2.7% to
++3.1%. The two at +3.1% (`T_Clock_D.jpg`, `FireBall02_8x8.tga`) were re-run with 30 launches each,
+alongside `28-4928x3264.jpg` as a control:
+
+| File | Baseline (ms) | Updated (ms) | Change |
+| --- | --- | --- | --- |
+| `T_Clock_D.jpg` | 212.9 | 213.8 | +0.4% |
+| `FireBall02_8x8.tga` | 210.4 | 209.1 | -0.6% |
+| `28-4928x3264.jpg` | 211.5 | 211.2 | -0.1% |
+
+Noise, then: no format is slower. The raw launches are in `local/ttfp-macos-deps.csv` and
+`local/ttfp-macos-deps-n30.csv`.
