@@ -16,7 +16,7 @@
 //! that configuration is to build and test on a machine with no vendored native trees at all.
 #![cfg(feature = "psd")]
 
-use fire_decode::{decode, DecodeError, DecodeOptions, PixelFormat};
+use fire_decode::{DecodeError, DecodeOptions, PixelFormat, decode};
 
 const COLOR_MODE_GRAYSCALE: u16 = 1;
 const COLOR_MODE_RGB: u16 = 3;
@@ -72,7 +72,9 @@ fn psd_rgba8_decodes_merged_composite() {
     // Planar channels interleave into RGBA, alpha carried through.
     assert_eq!(
         out.pixels,
-        vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 128, 10, 20, 30, 40]
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 128, 10, 20, 30, 40
+        ]
     );
     assert!(!out.alpha_opaque, "alpha 128/40 is not opaque");
 }

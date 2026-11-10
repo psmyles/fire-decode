@@ -12,7 +12,7 @@
 use std::io::Cursor;
 
 use exr::prelude::*;
-use fire_decode::{decode, DecodeOptions, DecodedImage, PixelFormat};
+use fire_decode::{DecodeOptions, DecodedImage, PixelFormat, decode};
 
 /// A 2x2 RGBA F32 EXR, pixels row-major.
 fn exr_2x2(px: [[f32; 4]; 4]) -> Vec<u8> {

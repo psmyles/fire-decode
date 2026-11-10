@@ -589,7 +589,7 @@ fn is_uncompressed_tga(bytes: &[u8]) -> bool {
 
 fn sniff(bytes: &[u8], ext: Option<&str>) -> Backend {
     use zune_core::bytestream::ZCursor;
-    use zune_image::codecs::{guess_format, ImageFormat};
+    use zune_image::codecs::{ImageFormat, guess_format};
 
     if bytes.starts_with(b"8BPS") {
         // PSD: psd_sdk gives a better composite than zune-psd, and carries the ICC.
@@ -2112,9 +2112,10 @@ fn decode_image(bytes: &[u8], ext_hint: Option<&str>) -> Result<DecodedImage, De
         .with_guessed_format()
         .map_err(|e| DecodeError::Other(e.to_string()))?;
     if reader.format().is_none()
-        && let Some(fmt) = ext_hint.and_then(image::ImageFormat::from_extension) {
-            reader.set_format(fmt);
-        }
+        && let Some(fmt) = ext_hint.and_then(image::ImageFormat::from_extension)
+    {
+        reader.set_format(fmt);
+    }
     let format = reader.format();
     let mut decoder = reader
         .into_decoder()
@@ -2508,7 +2509,7 @@ mod icc {
             use lcms2::{Flags, Intent, PixelFormat as Fmt, Profile, Transform};
 
             let icc = srgb_primaries_with(&lcms2::ToneCurve::new(1.0)); // linear: far from sRGB
-                                                                        // 2 MiB: comfortably past the threshold where the work is split.
+            // 2 MiB: comfortably past the threshold where the work is split.
             let pixels: Vec<u8> = (0..512 * 1024u32)
                 .flat_map(|i| {
                     [
@@ -2686,7 +2687,9 @@ mod tests {
         assert_eq!(out.channels, 4);
         assert_eq!(
             out.pixels,
-            vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 128, 10, 20, 30, 40]
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 128, 10, 20, 30, 40
+            ]
         );
     }
 
@@ -3354,12 +3357,14 @@ mod tests {
         );
         assert_eq!(out.source_format, "Farbfeld");
         assert_eq!(out.pixels, to_ne_bytes(&samples));
-        assert!(decode(
-            &bytes[..bytes.len() - 1],
-            Some("ff"),
-            &DecodeOptions::default()
-        )
-        .is_err());
+        assert!(
+            decode(
+                &bytes[..bytes.len() - 1],
+                Some("ff"),
+                &DecodeOptions::default()
+            )
+            .is_err()
+        );
     }
 
     /// A minimal uncompressed PSD: header, three empty sections, then the merged image as raw

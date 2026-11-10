@@ -26,7 +26,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{check_dims, DecodeError, DecodeOptions, DecodedImage, PixelFormat};
+use crate::{DecodeError, DecodeOptions, DecodedImage, PixelFormat, check_dims};
 
 const MODE_GRAYSCALE: u16 = 1;
 const MODE_RGB: u16 = 3;
@@ -916,12 +916,12 @@ fn inflate(
     size: usize,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<u8>, LayerError> {
+    use miniz_oxide::inflate::TINFLStatus;
     use miniz_oxide::inflate::core::inflate_flags::{
         TINFL_FLAG_HAS_MORE_INPUT, TINFL_FLAG_PARSE_ZLIB_HEADER,
         TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF,
     };
-    use miniz_oxide::inflate::core::{decompress, DecompressorOxide};
-    use miniz_oxide::inflate::TINFLStatus;
+    use miniz_oxide::inflate::core::{DecompressorOxide, decompress};
 
     const SLICE: usize = 1 << 20;
     let mut out = vec![0u8; size];

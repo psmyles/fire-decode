@@ -10,8 +10,8 @@
 //! The layer decoder is pure Rust, so most of this runs without the `psd` feature too. The tests
 //! that compare a layer against psd_sdk's composite of the same pixels need the feature.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fire_decode::{BlendMode, DecodeOptions, LayerCtl, LayerError, PixelFormat, PsdLayers, Rect};
 
@@ -294,7 +294,7 @@ fn layer_info_block(doc: &Doc) -> Vec<u8> {
             None => extra.extend_from_slice(&0u32.to_be_bytes()),
         }
         extra.extend_from_slice(&0u32.to_be_bytes()); // blending ranges
-                                                      // Pascal name: length byte + bytes, the whole field padded to a multiple of 4.
+        // Pascal name: length byte + bytes, the whole field padded to a multiple of 4.
         let name = l.name.as_bytes();
         extra.push(name.len() as u8);
         extra.extend_from_slice(name);
@@ -929,9 +929,11 @@ fn malformed_channel_data_is_an_error() {
         *b ^= 0x5A;
     }
     let layers = PsdLayers::open(Arc::new(bytes)).unwrap().unwrap();
-    assert!(layers
-        .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
-        .is_err());
+    assert!(
+        layers
+            .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
+            .is_err()
+    );
 
     // An RLE row whose run overruns it.
     let mut l = rgb_layer("r");
@@ -941,9 +943,11 @@ fn malformed_channel_data_is_an_error() {
     // compression(2) + 2 row counts(4) then row 0: a run byte; make it a 100-byte run.
     bytes[data + 6] = (257 - 100) as u8;
     let layers = PsdLayers::open(Arc::new(bytes)).unwrap().unwrap();
-    assert!(layers
-        .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
-        .is_err());
+    assert!(
+        layers
+            .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
+            .is_err()
+    );
 }
 
 /// A channel that holds only its compression word has no pixels: it is the channel's default
@@ -992,9 +996,11 @@ fn extreme_bounds_are_handled() {
         .unwrap()
         .unwrap();
     assert_eq!(layers.layers()[0].clip.width(), 2);
-    assert!(layers
-        .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
-        .is_err());
+    assert!(
+        layers
+            .decode_layer(0, &DecodeOptions::default(), &LayerCtl::DEFAULT)
+            .is_err()
+    );
 }
 
 /// A `luni` block claiming four billion characters, and 300 nested groups.

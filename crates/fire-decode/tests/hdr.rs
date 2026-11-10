@@ -10,7 +10,7 @@
 //! which the format uses for images narrower than 8 px. RGBE decodes as
 //! `mantissa/256 * 2^(E-128)`, exact in f32, so assertions are bit-exact.
 
-use fire_decode::{decode, DecodeOptions, DecodedImage, PixelFormat};
+use fire_decode::{DecodeOptions, DecodedImage, PixelFormat, decode};
 
 /// A 2x2 flat-scanline Radiance file: `magic` line, format line, blank line, resolution
 /// line, then four RGBE pixels row-major.

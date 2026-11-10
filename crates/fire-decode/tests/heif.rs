@@ -17,7 +17,7 @@
 //! that configuration is to build and test on a machine with no vendored native trees at all.
 #![cfg(feature = "heif")]
 
-use fire_decode::{decode, DecodeOptions, DecodedImage, PixelFormat};
+use fire_decode::{DecodeOptions, DecodedImage, PixelFormat, decode};
 
 /// Assert the top-left RGBA pixel is within `tol` of `expected` on every channel.
 fn assert_top_left(out: &DecodedImage, expected: [u8; 4], tol: i32) {

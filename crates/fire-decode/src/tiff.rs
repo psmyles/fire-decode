@@ -23,11 +23,11 @@
 use std::borrow::Cow;
 use std::io::Cursor;
 
+use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult, Limits};
 use tiff::tags::Tag;
-use tiff::ColorType;
 
-use crate::{check_dims, DecodeError, DecodedImage, PixelFormat};
+use crate::{DecodeError, DecodedImage, PixelFormat, check_dims};
 
 /// `ExtraSamples` value 1 — the alpha is *associated*, i.e. the colour samples are already
 /// multiplied by it. Everything downstream (and the shader, which composites
@@ -313,11 +313,7 @@ impl Sample for u16 {
 
 impl Sample for f32 {
     fn unpremultiply(c: f32, a: f32) -> f32 {
-        if a <= 0.0 {
-            0.0
-        } else {
-            c / a
-        }
+        if a <= 0.0 { 0.0 } else { c / a }
     }
 }
 
@@ -469,7 +465,7 @@ fn read_palette(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         _ => {
             return Err(malformed(
                 "indices must be one 1/2/4/8/16-bit sample a pixel",
-            ))
+            ));
         }
     };
     check_dims(width as usize, height as usize, 4, "TIFF")?;
@@ -579,7 +575,7 @@ fn read_palette(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode, DecodeOptions};
+    use crate::{DecodeOptions, decode};
 
     /// Build an uncompressed single-strip TIFF with full control over the sample layout.
     ///
@@ -881,7 +877,7 @@ mod tests {
     /// does not divide the image leave a short last strip, the case the layout check exists for.
     #[test]
     fn many_strip_compressed_tiff_reads_in_parallel() {
-        use tiff::encoder::{colortype, Compression, TiffEncoder};
+        use tiff::encoder::{Compression, TiffEncoder, colortype};
 
         let (w, h) = (701u32, 523u32);
         let rgb: Vec<u8> = (0..w * h * 3)

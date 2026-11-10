@@ -41,7 +41,7 @@
 use ddsfile::{Dds, DxgiFormat, FourCC, PixelFormatFlags};
 
 use crate::{
-    check_dims, level_dims, DecodeError, DecodedImage, PixelFormat, SheetKind, SheetLayout,
+    DecodeError, DecodedImage, PixelFormat, SheetKind, SheetLayout, check_dims, level_dims,
 };
 
 /// Half-precision 1.0, the alpha filled in for the alpha-less HDR formats.
@@ -186,7 +186,7 @@ fn identify(dds: &Dds) -> Option<Format> {
 /// spelling: a viewer has to show *something*, and that is what every other tool picks.
 fn from_dxgi(f: DxgiFormat) -> Option<Format> {
     use DxgiFormat as D;
-    use PixelFormat::{Rgba16Float, Rgba16Unorm, Rgba32Float, Rgba8Unorm};
+    use PixelFormat::{Rgba8Unorm, Rgba16Float, Rgba16Unorm, Rgba32Float};
     Some(match f {
         D::BC1_Typeless | D::BC1_UNorm | D::BC1_UNorm_sRGB => {
             Format::block(Block::Bc1, Rgba8Unorm, 8, 4, "DDS BC1")
@@ -281,7 +281,7 @@ fn from_dxgi(f: DxgiFormat) -> Option<Format> {
 /// straightened afterwards by [`decode`] — and the `ATI1`/`ATI2`/`BC4?`/`BC5?`/`3DC?` family is
 /// how BC4 and BC5 were spelled before the DX10 header existed.
 fn from_fourcc(cc: u32) -> Option<Format> {
-    use PixelFormat::{Rgba16Float, Rgba16Unorm, Rgba32Float, Rgba8Unorm};
+    use PixelFormat::{Rgba8Unorm, Rgba16Float, Rgba16Unorm, Rgba32Float};
     const fn code(s: &[u8; 4]) -> u32 {
         (s[0] as u32) | ((s[1] as u32) << 8) | ((s[2] as u32) << 16) | ((s[3] as u32) << 24)
     }

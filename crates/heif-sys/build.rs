@@ -60,9 +60,14 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let wrapper_c = crate_dir.join("wrapper.c");
     let var = |name: &str| env::var(name).unwrap_or_default();
-    let crt_static = var("CARGO_CFG_TARGET_FEATURE").split(',').any(|f| f == "crt-static");
+    let crt_static = var("CARGO_CFG_TARGET_FEATURE")
+        .split(',')
+        .any(|f| f == "crt-static");
 
-    println!("cargo:rerun-if-changed={}", crate_dir.join("wrapper.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        crate_dir.join("wrapper.h").display()
+    );
     println!("cargo:rerun-if-changed={}", wrapper_c.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor");
@@ -77,7 +82,8 @@ fn main() {
         Ok(_) => String::new(),
         Err(why) => format!("compile_error!({why:?});\n"),
     };
-    std::fs::write(out_dir.join("target_check.rs"), check).expect("failed to write target_check.rs");
+    std::fs::write(out_dir.join("target_check.rs"), check)
+        .expect("failed to write target_check.rs");
     let Ok(vendor_target) = target else {
         return;
     };

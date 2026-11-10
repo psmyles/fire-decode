@@ -10,7 +10,7 @@
 use ddsfile::{
     AlphaMode, D3D10ResourceDimension, D3DFormat, Dds, DxgiFormat, NewD3dParams, NewDxgiParams,
 };
-use fire_decode::{decode, DecodeError, DecodeOptions, DecodedImage, PixelFormat, SheetKind};
+use fire_decode::{DecodeError, DecodeOptions, DecodedImage, PixelFormat, SheetKind, decode};
 
 // --- fixture helpers -------------------------------------------------------------------------
 
@@ -585,7 +585,7 @@ fn raw_header(width: u32, height: u32, fourcc: Option<&[u8; 4]>) -> Vec<u8> {
     b.extend_from_slice(&0u32.to_le_bytes()); // depth
     b.extend_from_slice(&0u32.to_le_bytes()); // mip count
     b.extend_from_slice(&[0u8; 44]); // reserved1
-                                     // pixel format
+    // pixel format
     b.extend_from_slice(&32u32.to_le_bytes()); // pixel format size
     match fourcc {
         Some(cc) => {
