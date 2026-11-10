@@ -483,20 +483,26 @@ fn psd_raw(
     b
 }
 
-/// A malformed file must come back as an error, never take the process down.
-///
-/// psd_sdk is compiled without `NDEBUG`, and its `PSD_ASSERT` used to be a plain `assert()`: a
-/// second ICC profile resource (one of several asserts reachable from file contents) called
-/// `abort()`, which no `catch_unwind` can intercept — every open window went with it. The vendored
-/// `PsdAssert.h` now throws, and `fire_psd_open`'s `catch (...)` turns that into a refusal.
+/// A second ICC profile resource used to be the way file contents reached a `PSD_ASSERT`: psd_sdk
+/// is compiled without `NDEBUG`, and its plain `assert()` called `abort()`, which no
+/// `catch_unwind` can intercept. The vendored `PsdAssert.h` now throws, and every wrapper entry
+/// point catches it. Since the merge (FD3) the merged decode never calls psd_sdk's image-resources
+/// parser at all, so such a document simply decodes, and its profile is the first one, found in
+/// Rust (`psd_layers::composite_icc`).
 #[test]
-fn psd_failed_sdk_assertion_is_an_error_not_an_abort() {
+fn psd_with_two_icc_profiles_decodes_with_the_first() {
     let mut res = resource(1039, &[1, 2, 3, 4]);
     res.extend(resource(1039, &[5, 6, 7, 8]));
     let mut image = 0u16.to_be_bytes().to_vec();
     image.extend_from_slice(&[1, 2, 3]);
     let bytes = psd_raw(1, 1, COLOR_MODE_RGB, 3, &res, &image);
-    assert!(decode(&bytes, Some("psd"), &DecodeOptions::default()).is_err());
+    let opts = DecodeOptions {
+        honor_icc: false,
+        ..DecodeOptions::default()
+    };
+    let out = decode(&bytes, Some("psd"), &opts).expect("should decode");
+    assert_eq!(out.pixels, vec![1, 2, 3, 255]);
+    assert_eq!(out.icc.as_deref(), Some(&[1u8, 2, 3, 4][..]));
 }
 
 /// A greyscale document carrying a DISPLAY_INFO resource (Photoshop writes one whenever the
@@ -515,11 +521,13 @@ fn psd_grayscale_display_info_does_not_wrap_the_channel_count() {
     assert_eq!(out.pixels, vec![50, 50, 50, 200]);
 }
 
-/// An RLE run longer than what is left of the plane must stop at the plane's end. Upstream
-/// `DecompressRle` wrote the whole run (up to 127 bytes past the heap buffer); now the overrun is
-/// refused and the rest of the plane zero-filled rather than left uninitialised.
+/// An RLE run longer than what is left of the plane is refused. Upstream `DecompressRle` wrote
+/// the whole run (up to 127 bytes past the heap buffer). fire's patch zero-filled the rest of the
+/// plane and kept the image; 3D Review's refused the document. The merge (FD3) refuses it,
+/// as a truncated file is refused: a corrupt stream is not shown as a half-invented image. The
+/// rest of the plane is still zero-filled, for any psd_sdk caller that ignores the result.
 #[test]
-fn psd_rle_run_past_the_plane_is_bounded() {
+fn psd_rle_run_past_the_plane_is_refused() {
     let mut image = 1u16.to_be_bytes().to_vec(); // RLE
     for _ in 0..3 {
         image.extend_from_slice(&2u16.to_be_bytes()); // one row per channel, 2 bytes each
@@ -528,9 +536,10 @@ fn psd_rle_run_past_the_plane_is_bounded() {
     image.extend_from_slice(&[0xFF, 8]); // G: a 2-byte run of 8 (well-formed)
     image.extend_from_slice(&[0xFF, 9]); // B
     let bytes = psd_raw(2, 1, COLOR_MODE_RGB, 3, &[], &image);
-    let out = decode(&bytes, Some("psd"), &DecodeOptions::default()).expect("should decode");
-    // R's overrunning run is dropped (zero-filled); G and B decode normally.
-    assert_eq!(out.pixels, vec![0, 8, 9, 255, 0, 8, 9, 255]);
+    assert!(matches!(
+        decode(&bytes, Some("psd"), &DecodeOptions::default()),
+        Err(DecodeError::Malformed(_))
+    ));
 }
 
 /// The Version Info resource (1057) as Photoshop writes it: version, `hasRealMergedData`, writer

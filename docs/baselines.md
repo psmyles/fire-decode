@@ -181,3 +181,27 @@ It ran in a scratch clone whose workspace drops its in-tree copies of the three 
 No format is slower beyond the harness's noise (up to 4.8% between identical binaries, above).
 The JPEG, PNG and TGA paths are unchanged code. So step 1's macOS gate passes; its Windows half
 waits for the Windows libraries. The raw launches are in `local/ttfp-macos-step1.csv`.
+
+## Step 2a on macOS: the merged PSD bridge
+
+10 November 2026. fire `710b3f6` built against this repository with the merged psd-sdk-sys (FD3),
+in the same scratch clone as step 1:
+- **fire's tests:** 194 passed.
+- **The suites:** fire-decode's `tests/psd.rs` 20, and psd-sdk-sys's 18 ported from 3D Review plus
+  its real-file test.
+- **TTFP:** `scripts/ttfp.sh -A local/bin/fire-710b3f6 -B local/bin/fire-step2a -N 12`, on the two
+  real PSDs and two made with ImageMagick for size (`local/corpus/`):
+
+| File | Size | Baseline (ms) | Step 2a (ms) | Change |
+| --- | --- | --- | --- | --- |
+| `T_Sides_D.psd` (3D Review) | 1024×1024 RGB 8-bit | 215.6 | 213.0 | -1.2% |
+| `T_Noise_Burshed_01_M.psd` (CrimeCrew) | 2048×2048 RGBA 8-bit | 215.9 | 217.1 | +0.6% |
+| `rgb16_4096.psd` | 4096×4096 RGB 16-bit | 217.7 | 213.6 | -1.9% |
+| `big_rgba8_8192.psd` | 8192×8192 RGBA 8-bit | 323.5 | 318.3 | -1.6% |
+
+The two made files:
+- `magick T_CliffRock_02_N.png -depth 16 rgb16_4096.psd`;
+- `magick T_CliffRock_01_N.png -alpha set -channel A -fx "0.5+0.5*sin(i/64)" +channel -resize
+  8192x8192 big_rgba8_8192.psd`.
+
+No PSD is slower. The raw launches are in `local/ttfp-macos-step2a.csv`.

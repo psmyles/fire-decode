@@ -15,7 +15,12 @@ namespace imageUtil
 {
 	// ---------------------------------------------------------------------------------------------------------------------
 	// ---------------------------------------------------------------------------------------------------------------------
-	void DecompressRle(const uint8_t* PSD_RESTRICT src, unsigned int srcSize, uint8_t* PSD_RESTRICT dest, unsigned int size)
+	// fire-decode patch (vendor/VENDOR.txt), merged from both apps' fixes: every run is
+	// bounds-checked against both the destination and the source (review-psd P1, FIRE PATCH),
+	// and a malformed stream reports failure (P1) with the rest of the destination
+	// zero-filled (FIRE PATCH), so a caller that ignores the result never reads uninitialised
+	// memory.
+	bool DecompressRle(const uint8_t* PSD_RESTRICT src, unsigned int srcSize, uint8_t* PSD_RESTRICT dest, unsigned int size)
 	{
 		PSD_ASSERT_NOT_NULL(src);
 		PSD_ASSERT_NOT_NULL(dest);
@@ -27,8 +32,8 @@ namespace imageUtil
 			if (bytesRead >= srcSize)
 			{
 				PSD_ERROR("DecompressRle", "Malformed RLE data encountered");
-				memset(dest + offset, 0, size - offset); // FIRE PATCH: never leave the tail uninitialised
-				return;
+				memset(dest + offset, 0, size - offset);
+				return false;
 			}
 
 			const uint8_t byte = *src++;
@@ -43,14 +48,11 @@ namespace imageUtil
 			{
 				// next 257-byte bytes are replicated from the next source byte
 				const unsigned int count = static_cast<unsigned int>(257 - byte);
-
-				// FIRE PATCH: bound the run against both buffers (see vendor/VENDOR.txt). A
-				// malformed run used to write up to 127 bytes past `dest` and read past `src`.
-				if (count > size - offset || bytesRead >= srcSize)
+				if (bytesRead >= srcSize || count > size - offset)
 				{
 					PSD_ERROR("DecompressRle", "Malformed RLE data encountered");
 					memset(dest + offset, 0, size - offset);
-					return;
+					return false;
 				}
 
 				memset(dest + offset, *src++, count);
@@ -63,13 +65,11 @@ namespace imageUtil
 			{
 				// copy next byte+1 bytes 1-by-1
 				const unsigned int count = static_cast<unsigned int>(byte + 1);
-
-				// FIRE PATCH: same bound as the run branch above.
-				if (count > size - offset || count > srcSize - bytesRead)
+				if (count > srcSize - bytesRead || count > size - offset)
 				{
 					PSD_ERROR("DecompressRle", "Malformed RLE data encountered");
 					memset(dest + offset, 0, size - offset);
-					return;
+					return false;
 				}
 
 				memcpy(dest + offset, src, count);
@@ -80,6 +80,7 @@ namespace imageUtil
 				bytesRead += count;
 			}
 		}
+		return true;
 	}
 
 

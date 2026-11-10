@@ -833,10 +833,22 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
     if psd_layers::merged_image_is_placeholder(bytes) {
         return Err(DecodeError::NoMergedImage);
     }
-    let result = std::panic::catch_unwind(|| psd_sdk_sys::decode_psd(bytes))
+    // The wrapper checks the header against these before psd_sdk sizes a plane (FD3). Today's
+    // decode guards until step 3 gives each setup its own `limits` (FD5); the planar cap is twice
+    // the output's, and 56 channels is Photoshop's own limit.
+    let limits = psd_sdk_sys::Limits {
+        max_dim: MAX_DECODE_DIM as u32,
+        max_output_bytes: MAX_DECODE_BYTES as u64,
+        max_planar_bytes: 2 * MAX_DECODE_BYTES as u64,
+        max_channels: 56,
+    };
+    let threads = thread_budget();
+    let result = std::panic::catch_unwind(|| psd_sdk_sys::decode_psd(bytes, &limits, threads))
         .map_err(|_| DecodeError::Ffi("psd_sdk panicked".into()))?;
     let psd = result.map_err(|e| match e {
         psd_sdk_sys::PsdError::NoMergedImage => DecodeError::NoMergedImage,
+        e @ psd_sdk_sys::PsdError::TooLarge { .. } => DecodeError::TooLarge(e.to_string()),
+        e @ psd_sdk_sys::PsdError::OutOfMemory { .. } => DecodeError::Other(e.to_string()),
         e => DecodeError::Malformed(e.to_string()),
     })?;
     // The buffer is already allocated (psd-sdk-sys sizes it, bounded by the C++ guard and
@@ -854,6 +866,14 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         32 => PixelFormat::Rgba32Float,
         _ => PixelFormat::Rgba8Unorm,
     };
+    // Modes the wrapper converts out of leave the embedded profile describing a space these
+    // pixels are no longer in; applying it downstream would convert a second time.
+    use psd_sdk_sys::color_mode::{CMYK, LAB, MULTICHANNEL};
+    let icc = if matches!(psd.color_mode, CMYK | MULTICHANNEL | LAB) {
+        None
+    } else {
+        psd_layers::composite_icc(bytes)
+    };
     Ok(DecodedImage {
         pixels: psd.rgba,
         width: psd.width,
@@ -862,7 +882,7 @@ fn decode_psd(bytes: &[u8]) -> Result<DecodedImage, DecodeError> {
         bit_depth: psd.bits_per_channel.min(255) as u8,
         channels: psd.channels.min(255) as u8,
         palette: false,
-        icc: psd.icc,
+        icc,
         source_format: "PSD",
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,

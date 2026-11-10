@@ -1,19 +1,51 @@
 psd_sdk vendored from https://github.com/MolecularMatters/psd_sdk
 commit: f51449543273cbf12058ae92b230e0c4209f5066
 License: BSD-2-Clause (see LICENSE)
-Only src/Psd/ is vendored (the library); Samples/bin/build omitted.
+Only src/Psd/ is vendored (the library); Samples/bin/build omitted. Files are LF here; upstream's
+are CRLF.
 
-Local patches (search for "FIRE PATCH"):
-- Psd/PsdAssert.h: PSD_ASSERT throws psd::AssertFailure instead of calling assert().
-  The library is compiled without NDEBUG, so a failed assertion on malformed input used to
-  abort() the whole viewer process; wrapper.cpp catches every exception at the C ABI.
-- Psd/PsdDecompressRle.cpp: DecompressRle bounds every literal/run against both the source and
-  the destination, and zero-fills the rest of the destination on malformed data. Upstream wrote
-  up to 127 bytes past the destination (and read past the source) on a malformed run.
-- Psd/PsdParseImageResourcesSection.cpp: the DISPLAY_INFO resource sized its alpha-channel array
-  as `channelCount - 3` (unsigned), which wrapped for greyscale documents (1-2 channels) into an
-  allocation of ~4 billion entries.
+Patched, not an unmodified snapshot. fire and 3D Review each vendored this commit and hardened it
+separately; the two patch sets were merged when the crates did (fire-decode plan, FD3).
+`fire-decode.patch` beside this file is the whole diff against upstream, and each hunk is marked
+in the source: "FIRE PATCH" (fire's), "review-psd patch" (3D Review's), "fire-decode patch" (the
+two merged).
+
+- Psd/PsdAssert.h (FIRE PATCH): PSD_ASSERT throws psd::AssertFailure instead of calling assert().
+  The library is compiled without NDEBUG, so a failed assertion on malformed input used to abort()
+  the whole process; wrapper.cpp catches every exception at the C ABI. In the code the merged
+  decode runs, the only asserts left are null-argument checks, so file contents no longer reach
+  one; the patch stays as a backstop.
+- Psd/PsdDecompressRle.cpp/.h (fire-decode patch, merged from review-psd P1 and FIRE PATCH):
+  DecompressRle bounds every literal and run against both the source and the destination, returns
+  false on a malformed stream, and zero-fills the rest of the destination when it does. Upstream
+  wrote up to 127 bytes past the destination (and read past the source) on a malformed run.
+  - The two apps differed on what a bad run means. fire zero-filled the plane and kept the image;
+    3D Review refused the document. The merge refuses it (ParseImageDataSection fails), as a
+    truncated file is refused. The zero-fill remains for callers that ignore the result, such as
+    the layer parser.
+- Psd/PsdParseImageDataSection.cpp (review-psd patch P2):
+  - plane sizes in 64-bit arithmetic, refused past 32 bits;
+  - every allocation null-checked;
+  - the RLE payload bounded by the image data section it sits in;
+  - uncompressed planes checked against that section before the first is allocated (a truncated
+    RAW file used to have every plane allocated and zero-filled first);
+  - a channel count of 256 or more refused rather than asserted;
+  - a failed decode frees what it allocated and returns nullptr.
+- Psd/PsdParseImageResourcesSection.cpp (FIRE PATCH): the DISPLAY_INFO resource sized its
+  alpha-channel array as `channelCount - 3` (unsigned), which wrapped for greyscale documents
+  (1-2 channels) into an allocation of ~4 billion entries. The merged decode never calls this
+  parser (the composite's ICC profile is found in Rust, psd_layers.rs), so the guard is
+  unreachable and harmless.
+
+Header validation (bit depth, colour mode, channel counts, limits) is not a patch: it lives in
+../wrapper.cpp, against limits the Rust caller passes in.
 
 PSD layers are NOT decoded through psd_sdk: fire-decode parses the layer and mask section in
 Rust (crates/fire-decode/src/psd_layers.rs), so PsdParseLayerMaskSection.cpp is compiled but
 unreachable, like PsdExport.cpp.
+
+Upstream since this commit (checked 10 November 2026): three commits to bfa1173 (2026-08-11), "Add
+PSB Support. Add psd/psb open from memory support. add smart object support." They change the
+document and layer parsers and the shared headers, but neither file the merged decode goes through
+(PsdParseImageDataSection.cpp, PsdDecompressRle.cpp). Not taken: they would bring a rewritten
+layer parser fire-decode never calls, and no PSB merged image.

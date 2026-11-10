@@ -39,6 +39,10 @@ jobs:
       - name: Test, psd + heif
         run: cargo test -p fire-decode --locked --features psd,heif
 
+      # The merged PSD bridge's own suites (FD3). real_psd skips here: its PSD is in 3D Review.
+      - name: Test, psd-sdk-sys
+        run: cargo test -p psd-sdk-sys --locked
+
       # FD13: heif on Windows without the static CRT must stop at heif-sys's named error, not deep
       # in a mixed-CRT link. Checked from here by cross-checking for the MSVC target.
       - name: heif without crt-static on Windows is a named error

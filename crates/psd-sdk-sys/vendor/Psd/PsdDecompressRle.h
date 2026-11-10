@@ -10,7 +10,9 @@ namespace imageUtil
 {
 	/// \ingroup ImageUtil
 	/// Decompresses a block of RLE encoded data using the PackBits (http://en.wikipedia.org/wiki/PackBits) algorithm.
-	void DecompressRle(const uint8_t* PSD_RESTRICT src, unsigned int srcSize, uint8_t* PSD_RESTRICT dest, unsigned int size);
+	/// Returns false if the stream is malformed, having written nothing past \a size and zero-filled
+	/// the rest of \a dest (fire-decode patch, merged from review-psd P1 and FIRE PATCH).
+	bool DecompressRle(const uint8_t* PSD_RESTRICT src, unsigned int srcSize, uint8_t* PSD_RESTRICT dest, unsigned int size);
 
 	/// \ingroup ImageUtil
 	/// Compresses a block of data to RLE encoded data using the PackBits (http://en.wikipedia.org/wiki/PackBits) algorithm.

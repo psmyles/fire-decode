@@ -1387,18 +1387,33 @@ fn find_icc(b: &[u8], start: usize, end: usize) -> Option<Vec<u8>> {
 /// is taken at its word. PSB shares the header and resources layout, so it is read the same way.
 #[cfg(feature = "psd")]
 pub(crate) fn merged_image_is_placeholder(b: &[u8]) -> bool {
-    fn version_info(b: &[u8]) -> Option<&[u8]> {
-        let mut c = Cur::new(b, 0, b.len());
-        if c.take(4).ok()? != b"8BPS" {
-            return None;
-        }
-        c.skip(22).ok()?; // the rest of the 26-byte header
-        let mode_data_len = c.u32().ok()? as usize;
-        c.skip(mode_data_len).ok()?;
-        let res_len = c.u32().ok()? as usize;
-        find_resource(b, c.pos, c.pos.saturating_add(res_len), 1057)
+    let version_info =
+        image_resources(b).and_then(|(start, end)| find_resource(b, start, end, 1057));
+    version_info.and_then(|v| v.get(4)) == Some(&0)
+}
+
+/// The composite's embedded ICC profile, found here rather than through psd_sdk's
+/// image-resources parser, which the merged decode never calls (FD3): its `DISPLAY_INFO` branch
+/// assumed RGB and wrote through NULL for a greyscale document with alpha.
+#[cfg(feature = "psd")]
+pub(crate) fn composite_icc(b: &[u8]) -> Option<Vec<u8>> {
+    let (start, end) = image_resources(b)?;
+    find_icc(b, start, end)
+}
+
+/// Where the image resources section's blocks lie: `(start, end)`, `end` clamped by
+/// `find_resource`'s cursor to the file.
+#[cfg(feature = "psd")]
+fn image_resources(b: &[u8]) -> Option<(usize, usize)> {
+    let mut c = Cur::new(b, 0, b.len());
+    if c.take(4).ok()? != b"8BPS" {
+        return None;
     }
-    version_info(b).and_then(|v| v.get(4)) == Some(&0)
+    c.skip(22).ok()?; // the rest of the 26-byte header
+    let mode_data_len = c.u32().ok()? as usize;
+    c.skip(mode_data_len).ok()?;
+    let res_len = c.u32().ok()? as usize;
+    Some((c.pos, c.pos.saturating_add(res_len).min(b.len())))
 }
 
 /// Additional-info keys of layers that have no pixels to show: adjustment and fill layers.

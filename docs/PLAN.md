@@ -75,14 +75,27 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
    - **Still Windows:** see "Needs Windows".
 
 
-4. **Step 2a, the PSD merge (FD3).** Cross-platform; develop and test on the Mac.
-   - **Patches:** the union of fire's patches and 3D Review's `review.patch` (P1, extended P2), with the
-     two RLE fixes reconciled.
-   - **Tests:** port 3D Review's malformed-file tests (`crates/psd/tests/synthetic.rs`) and
-     `real_psd.rs` alongside fire's `tests/psd.rs`.
-   - **ICC:** the composite's ICC profile through `psd_layers.rs`'s Rust `find_icc`, never psd_sdk's
-     image-resources parser.
-   - **Plus** `links = "fire_psd"`.
+4. **Step 2a, the PSD merge (FD3) - done on the Mac** (10 November 2026).
+   - **Patches:** both sets, with the two RLE fixes reconciled. A malformed run is refused, with the
+     rest of the plane still zero-filled. `vendor/fire-decode.patch` is the whole diff against
+     upstream, and `vendor/VENDOR.txt` lists each hunk's origin.
+   - **The wrapper (ABI v2):**
+     - 3D Review's staged decode, borrowed bytes and checks;
+     - fire's colour modes, document depth and integer path;
+     - limits and the thread count from Rust;
+     - the threaded interleave extended to the converted modes;
+     - the composite's ICC profile from Rust's `composite_icc`, never psd_sdk's resources parser.
+   - **The Rust side:** 3D Review's `DocHandle<'bytes>`, the output allocated fallibly
+     (`OutOfMemory`), and specific errors.
+   - **Tests:** 3D Review's 17 synthetic cases ported to psd-sdk-sys (plus a threads case) and its
+     real-file test (`T_Sides_D.psd` from the 3D Review checkout), beside fire's 20.
+   - **Two fire tests changed meaning.** A malformed RLE run is now refused. A document with two
+     ICC profiles now decodes, taking the first, because the parser whose assert it reached is no
+     longer called.
+   - **psd_sdk stays at `f514495`.** Upstream's later PSB commits don't touch the merged path
+     (VENDOR.txt).
+   - **The macOS gate passed:** fire's tests, both suites, and TTFP on four PSDs up to 8192², none
+     slower ([`baselines.md`](baselines.md)).
 
 5. **Step 2b, the HEIF wrapper v2 (FD16).** Develop and test on the Mac with the re-vendored macOS
    libraries.
@@ -151,7 +164,11 @@ The Windows stretch, in order. Each item names what it unblocks.
    - fire's notices point at this repository's tree at the tag, with libheif / libde265 as
      LGPL-3.0-or-later, not `-only` (FD14).
 
-The Windows halves of steps 2a, 2b and 3 are added below as those steps are done on the Mac.
+8. **Step 2a's Windows half:** psd-sdk-sys's tests and fire-decode's `tests/psd.rs` (CI's Windows
+   job covers both), and fire's TTFP on the four PSDs in `docs/baselines.md` against item 1's
+   baseline binary.
+
+The Windows halves of steps 2b and 3 are added below as those steps are done on the Mac.
 
 ## References
 
