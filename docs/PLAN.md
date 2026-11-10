@@ -1,9 +1,9 @@
 # fire-decode - Work Plan
 
-**Status, 10 November 2026:** this repository holds designs only. Asset Check is done, so the queue
-below starts now. The crate itself still lives in fire
-(`crates/fire-decode`, `crates/psd-sdk-sys`, `crates/heif-sys`). The work below is ordered for a stretch
-of work on a Mac. Items that need Windows are collected at the end.
+**Status, 10 November 2026:** the crate lives here now (step 1's Mac part), the repository is public,
+and work continues on a Mac with steps 2a, 2b and 3. Everything that needs Windows is collected in
+"Needs Windows", kept current as the Mac work goes, to be done in one stretch afterwards. fire,
+3D Review and bite still decode with their own copies until they move to a tag.
 
 ## What's here
 
@@ -59,8 +59,8 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
      So the macOS test is that no format gets slower, per the user. 3D Review's Windows baselines are
      done (its `docs/PLAN.md`).
 
-3. **Step 1, the parts a Mac can do - done** (10 November 2026), on the `step-1` branch.
-   - **What's on the branch:**
+3. **Step 1, the parts a Mac can do - done** (10 November 2026), merged and pushed.
+   - **What came in:**
      - fire's three crates with their history (35 commits), the vendored binaries dropped;
      - a standalone workspace: edition 2024, Rust 1.99.1, 3D Review's lints, no default features;
      - the macOS HEIF stack re-vendored, from vcpkg `e529425f2f`: libheif 1.23.7, libde265 1.1.3,
@@ -74,42 +74,6 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
      `minos` is 11.0 ([`baselines.md`](baselines.md)).
    - **Still Windows:** see "Needs Windows".
 
-   What follows is the original list, kept for reference. It started only **after fire's Asset Check
-   additions had landed** (fire `docs/PLAN.md` A1), so they came over with the history.
-   - **Extract** `crates/fire-decode`, `crates/psd-sdk-sys` and `crates/heif-sys` from fire with
-     `git filter-repo`, keeping their history but **dropping `crates/heif-sys/vendor/*/lib` and
-     `vendor/*/include` from it** (FD16).
-     - That takes two passes: one keeping the three paths, then one removing the vendor paths with
-       `--invert-paths`.
-   - **A standalone workspace:**
-     - dependencies no longer inherited from fire's workspace;
-     - edition 2024 and the latest stable Rust;
-     - lints at 3D Review's level;
-     - no default features (FD13).
-   - **Re-vendor the macOS HEIF stack** following `crates/heif-sys/vendor/VENDOR.txt`, with these
-     changes (FD16):
-     - the newest libheif and dav1d in one vcpkg baseline;
-     - `arm64-osx` with `VCPKG_OSX_DEPLOYMENT_TARGET=11.0`, because today's libraries say `minos 27.0`;
-     - the vcpkg baseline commit and every library version recorded in `VENDOR.txt`, so the Windows
-       re-vendor uses the same baseline;
-     - checks: libheif references dav1d (`nm -u … | grep dav1d`), no plugin-loading code, and `minos`
-       11.0 (`otool -l … | grep -A3 LC_BUILD_VERSION`).
-   - **Committed, hand-kept bindings** with size and offset asserts for heif-sys (`wrapper.h`) and
-     psd-sdk-sys, and bindgen removed (FD3, FD16).
-   - **Target guards in heif-sys's `build.rs`:**
-     - `target_env = "msvc"` on Windows;
-     - `crt-static` required on Windows;
-     - a named `compile_error!` on any other target.
-   - **Licence texts** grouped by feature (LGPL-3.0-or-later for libheif and libde265, with
-     `LGPL-3.0.txt` and `GPL-3.0.txt`), and the LGPL relink section (FD14).
-   - **CI** (FD13): the macOS job now; the Windows job once the Windows libraries exist.
-   - **Not yet:**
-     - the Windows libraries;
-     - the first tag;
-     - making the repository public;
-     - fire switching to the tag.
-
-     See "Needs Windows".
 
 4. **Step 2a, the PSD merge (FD3).** Cross-platform; develop and test on the Mac.
    - **Patches:** the union of fire's patches and 3D Review's `review.patch` (P1, extended P2), with the
@@ -141,12 +105,53 @@ gate as "macOS passed; Windows pending".
 
 ## Needs Windows (later)
 
-- **Re-vendor the Windows HEIF stack:** `x64-windows-static` (/MT) on the same vcpkg baseline,
-  debug-stripped (FD16, FD20).
-- **The Windows halves** of every gate: TTFP, tests, `fire.exe` / `fire_shellext.dll` import tables
-  with no VC++ runtime DLLs.
-- **Then** make the repository public, tag `v0.1.0` with the source tarballs on the release (FD14), and
-  move fire to the tag (migration step 1's gate).
+The Windows stretch, in order. Each item names what it unblocks.
+
+1. **Step 0's Windows baselines.** Take them before anything changes fire or bite on Windows.
+   - **fire TTFP** with `scripts/ttfp.ps1`, from fire `710b3f6`, over the same 13 files as the macOS
+     baseline (`docs/baselines.md`; the derived AVIF / EXR files are in the Mac's `local/corpus/`).
+     Keep a copy of the baseline `fire.exe` for the A/B later.
+   - **bite:** cold and warm import by format with `bench/bite-import`, and `BITE_MAGICK` set to the
+     bundled `magick.exe`. Also `bite-gui.exe`'s and `bite.exe`'s import tables (FD20 expects only
+     `VCRUNTIME140`).
+   - 3D Review's Windows baselines are done (its `docs/PLAN.md`).
+2. **Re-vendor the Windows HEIF stack** (FD16, FD20), from the same vcpkg baseline as macOS
+   (`crates/heif-sys/vendor/VENDOR.txt` has the recipe):
+   - `vcpkg install "libheif[core,dav1d,libde265]:x64-windows-fire-decode"` with
+     `--overlay-triplets=crates/heif-sys/vendor/triplets --binarysource=clear`. The triplet is
+     committed: static libraries, /MT, release only, no plugin loading.
+   - Strip with `llvm-objcopy --strip-debug`, and copy `include/libheif` and the three libraries to
+     `crates/heif-sys/vendor/x64-windows/`. Check the library names against `build.rs`, which links
+     `heif`, `libde265` and `dav1d`.
+   - Run VENDOR.txt's checks: codec references, no `LoadLibrary`, `/DEFAULTLIB:LIBCMT` (not
+     `MSVCRT`), no encoders.
+   - Update VENDOR.txt and `THIRD-PARTY-NOTICES.md` with the Windows versions, and commit the
+     libraries alone in one commit.
+3. **CI's Windows job** (FD13): fmt, clippy and tests for core, psd and psd + heif on `windows-latest`,
+   with `crt-static`. Its `.cargo/config.toml` or `RUSTFLAGS` must not reach the macOS job's
+   "heif without crt-static is a named error" check.
+4. **fire on the static CRT** (FD20): `-C target-feature=+crt-static` for `x86_64-pc-windows-msvc` in
+   fire's `.cargo/config.toml`. Check that nothing prebuilt is `/MD`, and that `fire.exe`,
+   `fire-cli.exe` and `fire_shellext.dll` import no `MSVCP140`, `VCRUNTIME140*` or
+   `api-ms-win-crt-*`.
+5. **Step 1's Windows gate**, with fire built against this repository (as on the Mac,
+   `docs/baselines.md`):
+   - fire's tests pass;
+   - TTFP within 2% per format against item 1's baseline, HEIC / AVIF included;
+   - fire-shellext thumbnails a HEIC;
+   - an AVIF decodes (dav1d linked).
+6. **The first release:** tag `v0.1.0`. Its GitHub release carries the upstream source tarballs of
+   libheif 1.23.7, libde265 1.1.3 and dav1d 1.5.4, plus the triplets (FD14). The tarballs can be
+   fetched anywhere; the tag waits for item 2.
+7. **fire moves to the tag:**
+   - `fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "v0.1.0" }`, and fire's
+     three in-tree crates removed;
+   - the installer-association test moves into a fire crate, checking `all_extensions()` once step 3
+     adds it (FD2, FD9);
+   - fire's notices point at this repository's tree at the tag, with libheif / libde265 as
+     LGPL-3.0-or-later, not `-only` (FD14).
+
+The Windows halves of steps 2a, 2b and 3 are added below as those steps are done on the Mac.
 
 ## References
 
