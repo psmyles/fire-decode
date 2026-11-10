@@ -1078,19 +1078,64 @@ fn decode_exr(bytes: &[u8], progress: &dyn Fn(f32)) -> Result<DecodedImage, Deco
     })
 }
 
-/// HEIC/HEIF/AVIF via libheif (C FFI: libde265 for HEVC, dav1d for AV1). Runs inside
-/// catch_unwind so a panic in the thin wrapper cannot escape; libheif itself reports
-/// malformed input as an error code rather than crashing.
+/// HEIC/HEIF/AVIF via libheif (libde265 for HEVC, dav1d for AV1), through heif-sys's ABI v2
+/// (FD16). Runs inside catch_unwind as a backstop; the C++ wrapper catches its own exceptions,
+/// and libheif reports malformed input as an error code.
 ///
-/// 8-bit sources come back as `Rgba8Unorm`; HDR (10/12-bit) sources as `Rgba16Unorm`
-/// scaled to full range. We treat the decoded values as display-encoded (SDR), so a
-/// true-HDR (PQ/HLG) HEIF will display without tonemapping — acceptable for v1, and most
-/// HEIC (phone photos) is 8-bit SDR, often Display-P3, whose ICC the [`icc`] pass honors.
+/// - **Limits:** the wrapper checks an item's signalled size against them before libheif decodes
+///   it, and sets libheif's own security limits from them. Today's decode guards until step 3
+///   gives each setup its own (FD5).
+/// - **Threads:** the budget; the wrapper gives a grid's tiles their own threads and a single
+///   image the codec's (FD8).
+/// - **Sequence-only files** (no primary image) show their first frame (FD16).
+///
+/// 8-bit sources come back as `Rgba8Unorm`; 10/12-bit as `Rgba16Unorm` scaled to full range.
+/// libheif converts to sRGB, so a PQ / HLG file comes back in libheif's own SDR rendering until
+/// step 6b adds `hdr: Linear`.
 #[cfg(feature = "heif")]
 fn decode_heif(bytes: &[u8], label: &'static str) -> Result<DecodedImage, DecodeError> {
-    let result = std::panic::catch_unwind(|| heif_sys::decode_heif(bytes))
+    use heif_sys::HeifError;
+    const MAX_ICC_LEN: usize = 16 << 20;
+    let limits = heif_sys::Limits {
+        max_dim: MAX_DECODE_DIM as u32,
+        max_output_bytes: MAX_DECODE_BYTES as u64,
+        max_total_memory: 2 * MAX_DECODE_BYTES as u64,
+        max_tiles: 0,
+        max_sequence_frames: MAX_ANIMATION_FRAMES as u32,
+        max_color_profile_size: MAX_ICC_LEN as u32,
+    };
+    let ctl = heif_sys::Ctl {
+        library_threads: thread_budget(),
+        ..heif_sys::Ctl::default()
+    };
+    let decode = || -> Result<(heif_sys::Image, Option<Vec<u8>>), HeifError> {
+        let mut file = heif_sys::HeifFile::open(bytes, &limits)?;
+        match file.primary_id() {
+            Some(id) => {
+                let info = file.item_info(id)?;
+                let icc = file.item_icc(&info, MAX_ICC_LEN);
+                Ok((file.decode_item(id, &ctl)?, icc))
+            }
+            None => {
+                // No primary image: the first frame of the first visual track stands in.
+                let mut track = file.first_track()?;
+                let frame = track.next_frame(&ctl)?.ok_or(HeifError::NoImage)?;
+                Ok((frame, None))
+            }
+        }
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
         .map_err(|_| DecodeError::Ffi("libheif panicked".into()))?;
-    let img = result.map_err(|e| DecodeError::Ffi(e.to_string()))?;
+    let (img, icc) = result.map_err(|e| match e {
+        HeifError::TooLarge => DecodeError::TooLarge(e.to_string()),
+        HeifError::OutOfMemory { .. } | HeifError::Cancelled => DecodeError::Other(e.to_string()),
+        HeifError::Libheif(_) | HeifError::BadImage | HeifError::NoImage | HeifError::NotFound => {
+            DecodeError::Malformed(e.to_string())
+        }
+        HeifError::Exception | HeifError::InitFailed | HeifError::Ffi(_) => {
+            DecodeError::Ffi(e.to_string())
+        }
+    })?;
 
     let (format, bit_depth) = if img.is_16bit {
         (PixelFormat::Rgba16Unorm, img.bit_depth)
@@ -1106,7 +1151,7 @@ fn decode_heif(bytes: &[u8], label: &'static str) -> Result<DecodedImage, Decode
         // Report the source channel count for the status bar (4 with alpha, else 3).
         channels: if img.has_alpha { 4 } else { 3 },
         palette: false,
-        icc: img.icc,
+        icc,
         source_format: label,
         alpha_opaque: false, // set by `decode` after the final buffer is built
         downscaled_from: None,

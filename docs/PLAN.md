@@ -97,15 +97,30 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
    - **The macOS gate passed:** fire's tests, both suites, and TTFP on four PSDs up to 8192², none
      slower ([`baselines.md`](baselines.md)).
 
-5. **Step 2b, the HEIF wrapper v2 (FD16).** Develop and test on the Mac with the re-vendored macOS
-   libraries.
-   - A C++ wrapper with `catch (...)` at every entry point, and a versioned C ABI;
-   - `heif_init` once per process;
-   - size guard and libheif security limits passed in from Rust;
-   - thread counts and progress / cancel hooks;
-   - output into a Rust-allocated buffer;
-   - the first frame of sequence-only files.
-   - Also measure what libheif's SDR rendering does to PQ / HLG files.
+5. **Step 2b, the HEIF wrapper v2 (FD16) - done on the Mac** (10 November 2026).
+   - **`wrapper.cpp` (ABI v2):**
+     - `catch (...)` at every entry point;
+     - `heif_init` once per process through `std::call_once`, `heif_deinit` never;
+     - libheif's security limits set from the caller's (pixels, total memory, tiles, sequence
+       frames, profile size);
+     - the signalled size checked against the limits before decoding;
+     - thread counts split by tiling (FD8);
+     - progress and cancel hooks;
+     - `ignore_transformations` and nclx passthrough;
+     - one copy, straight into a buffer Rust allocates, with bit replication and un-premultiply.
+   - **Already in the ABI for later steps:** sequence tracks (first visual track, `decode_next`,
+     timescale, repetitions; the edit list ignored), auxiliary images by URN, and raw item data.
+   - **fire-decode:** decodes through it. A sequence-only file shows its first frame. Errors map to
+     `TooLarge` / `Malformed` / `Ffi`. Progress waits for step 3's `Sync` callback.
+   - **The macOS gate passed:**
+     - every malformed and oversized fixture is an error, never an abort, the oversized ones
+       `TooLarge`;
+     - the depth, grid, portrait, mirror, sequence-only and premultiplied fixtures are correct
+       (`tests/heif_fixtures.rs`; the `tmap`-primary file waits for 6c);
+     - busy threads stay within the budget;
+     - TTFP is no slower anywhere, and the 48 MP HEIC is 21% faster ([`baselines.md`](baselines.md)).
+   - **Measured:** libheif's default rendering of PQ / HLG reinterprets the signal, and it doesn't
+     convert Display P3 nclx either. Both are recorded in FD17 and FD5.
 
 6. **Step 3, the API changes** (setups including `inspect()`, `output` including `Rgba8OrFloat`,
    `source`, `limits`, `hdr`, `fit`, `frames`, `surfaces`, `stored_mips`, `probe()`, thread budget,
@@ -168,7 +183,15 @@ The Windows stretch, in order. Each item names what it unblocks.
    job covers both), and fire's TTFP on the four PSDs in `docs/baselines.md` against item 1's
    baseline binary.
 
-The Windows halves of steps 2b and 3 are added below as those steps are done on the Mac.
+9. **Step 2b's Windows half:**
+   - `tests/heif_fixtures.rs` and fire-decode's HEIF tests (CI's Windows job);
+   - fire's TTFP on the three iPhone HEICs, their AVIFs and `grid_iphone.heic`, against item 1's
+     baseline;
+   - the thread check on `IMG_2135.HEIC`. There's no `ps -M` on Windows: count threads with
+     Process Explorer or `Get-Process`;
+   - fire-shellext thumbnails a HEIC through ABI v2.
+
+The Windows half of step 3 is added below when step 3 is done on the Mac.
 
 ## References
 

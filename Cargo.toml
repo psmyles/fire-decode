@@ -67,6 +67,8 @@ ddsfile = "0.6"
 bcdec_rs = "0.2"
 miniz_oxide = "0.8"
 bytemuck = { version = "1", features = ["derive"] }
+# Tests only: reading fixtures/heif/expected.json.
+serde_json = "1"
 
 psd-sdk-sys = { path = "crates/psd-sdk-sys" }
 heif-sys = { path = "crates/heif-sys" }

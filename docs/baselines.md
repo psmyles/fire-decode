@@ -225,3 +225,45 @@ alongside `28-4928x3264.jpg` as a control:
 
 Noise, then: no format is slower. The raw launches are in `local/ttfp-macos-deps.csv` and
 `local/ttfp-macos-deps-n30.csv`.
+
+## Step 2b on macOS: HEIF wrapper v2
+
+10 November 2026. fire `710b3f6` built against this repository with heif-sys's ABI v2 (FD16),
+in the same scratch clone:
+- **fire's tests:** 194 passed.
+- **This workspace:** 199 tests. `tests/heif_fixtures.rs` checks every `fixtures/heif` file against
+  `expected.json`; one waits for step 6c.
+
+**Threads (FD8).** The 48 MP iPhone grid (`IMG_2135.HEIC`, 9×5 tiles) and its AVIF were decoded
+three times at each budget, sampling the process's thread count with `ps -M` and its CPU time with
+`ps -o cputime`:
+
+| Budget | HEIC: threads | HEIC: cores busy | HEIC: ms | AVIF: threads | AVIF: ms |
+| --- | --- | --- | --- | --- | --- |
+| libheif's default | 8 | 3.3 | 208 | 14 | 111 |
+| 1 | 2 | 1.2 | 652 | 0 | 243 |
+| 2 | 4 | 2.0 | 347 | 2 | 146 |
+| 4 | 8 | 3.3 | 205 | 4 | 105 |
+| 8 | 16 | 5.1 | 134 | 8 | 106 |
+
+- **AVIF:** a single image, decoded on dav1d's threads: exactly the budget. Unbudgeted, dav1d took
+  all 14 cores.
+- **The HEIC grid:** N tile threads, each with a libde265 decoder that starts one worker thread of
+  its own. So 2N threads, of which one per pair waits. Busy cores stay within the budget (the
+  sampler accounts for about 0.2).
+
+**TTFP**, 12 launches each, against `local/bin/fire-710b3f6`:
+
+| File | Baseline (ms) | Step 2b (ms) | Change |
+| --- | --- | --- | --- |
+| `IMG_2131.HEIC` | 187.9 | 189.2 | +0.7% |
+| `IMG_2135.HEIC` (48 MP) | 329.1 | 258.4 | -21.5% |
+| `IMG_2139.HEIC` (portrait) | 210.1 | 194.4 | -7.5% |
+| `IMG_2131.avif` | 193.6 | 192.4 | -0.6% |
+| `IMG_2135.avif` | 238.7 | 234.2 | -1.9% |
+| `IMG_2139.avif` | 186.9 | 191.7 | +2.6% |
+| `fixtures/heif/grid_iphone.heic` | 182.3 | 189.6 | +4.0% (mean +0.6%, sd 9.6) |
+
+The 48 MP grid is faster because the budget gives it 8 tile threads where libheif's default is 4,
+and because a copy is gone. No format is slower beyond noise. The raw launches are in
+`local/ttfp-macos-step2b.csv`.

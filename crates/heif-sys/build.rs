@@ -1,6 +1,7 @@
 //! Build script for heif-sys.
 //!
-//! - `cc` compiles `wrapper.c` against the vendored libheif headers into a static lib.
+//! - `cc` compiles `wrapper.cpp` (C++17, so every entry point can catch every exception) against
+//!   the vendored libheif headers into a static lib.
 //! - The prebuilt vendored static libs (libheif + libde265 + dav1d) are linked.
 //! - The Rust side of `wrapper.h` is committed (`src/bindings.rs`), so nothing here needs bindgen
 //!   or libclang (FD16).
@@ -58,7 +59,7 @@ fn vendor_for(os: &str, arch: &str, env: &str, crt_static: bool) -> Result<Vendo
 fn main() {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let wrapper_c = crate_dir.join("wrapper.c");
+    let wrapper_cpp = crate_dir.join("wrapper.cpp");
     let var = |name: &str| env::var(name).unwrap_or_default();
     let crt_static = var("CARGO_CFG_TARGET_FEATURE")
         .split(',')
@@ -68,7 +69,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         crate_dir.join("wrapper.h").display()
     );
-    println!("cargo:rerun-if-changed={}", wrapper_c.display());
+    println!("cargo:rerun-if-changed={}", wrapper_cpp.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor");
 
@@ -98,12 +99,17 @@ fn main() {
         );
     }
 
-    // --- cc: compile wrapper.c against the vendored libheif headers --------------
-    cc::Build::new()
-        .file(&wrapper_c)
+    // --- cc: compile wrapper.cpp against the vendored libheif headers -----------
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .file(&wrapper_cpp)
         .include(&inc)
         .warnings(false)
-        .compile("fire_heif");
+        .flag_if_supported("/std:c++17")
+        .flag_if_supported("/EHsc")
+        .flag_if_supported("-std=c++17");
+    build.compile("fire_heif");
 
     // --- link the vendored static decoder stack ---------------------------------
     println!("cargo:rustc-link-search=native={}", lib.display());
