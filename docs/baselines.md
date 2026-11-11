@@ -984,7 +984,8 @@ bite's `test_images` by absolute path: 15 images, 24 bindings), 15 runs
 RGBA8): their mip chains, which step 7 keeps with each image so that the material slot, the Tex
 viewport and the UV view share one. Before, each chain was built at upload and dropped. The Mac
 measured +3.7% footprint for the same change, but its footprint counts unified GPU memory in the
-base; Windows' private bytes count only the CPU side, where the chains live.
+base; Windows' private bytes count only the CPU side, where the chains live. **Accepted** by the
+user on 11 November 2026, as the price of the 87% shorter upload frame.
 
 **Nothing else moved:** `review-snapshot` renders of the HEIC / AVIF planes and the 15-texture
 model (`shaded`), and of `SM_Wall_Break_4x3m.fbx` and `monkey.fbx` under the UV checker

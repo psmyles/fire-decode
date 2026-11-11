@@ -2,7 +2,7 @@
 
 **Status, 11 November 2026:** the crate lives here, the repository is public, and every step is done
 on a Mac. The Windows stretch ran on 11 November: every gate passed but one, 3D Review's texture-load
-memory budget ("Needs Windows", open). fire, 3D Review and bite each build on it on a `fire-decode`
+memory budget, which the user accepted. fire, 3D Review and bite each build on it on a `fire-decode`
 branch, which merges when they move to the first tag. That tag, and a few hands-on checks, are what
 remain.
 
@@ -12,6 +12,8 @@ remain.
 | --- | --- |
 | [`fire-decode-plan.md`](../fire-decode-plan.md) | The migration design: fire-decode becomes the decoder shared by fire, 3D Review and bite, with HEIF / HEIC / AVIF included. Decisions FD1-FD20; rollout steps 0-7 with gates in §5. fire's `docs/fire-decode-plan.md` is a copy, so keep the two in step |
 | [`asset-check-plan.md`](../asset-check-plan.md) | A pointer only. The Asset Check design moved on 5 November 2026 to the rules repo, SandboxVR/exp-content-rules (`docs/asset-check-plan.md`); its history up to then is here |
+| [`product.json`](../product.json) | The crate's name, version, description and home: the only place they are set, as in fire and 3D Review. `build.rs` reads the version into `fire_decode::VERSION`, and the release tag is `v` + it. The Cargo manifests carry no version |
+| [`scripts/release.sh`](../scripts/release.sh) | Tags and publishes a release from `product.json`'s version: checks (main, pushed, CI green, both targets' libraries, a source tarball per vendored library), then the tag and a GitHub release with the tarballs, the triplets and their checksums (FD14). CI fails a tag that isn't `v` + that version |
 
 ## Priority
 
@@ -226,8 +228,8 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
       crate's by a test; its output is unchanged.
 
 13. **Every step is done on the Mac, and on Windows** (11 November 2026, "Needs Windows"). What
-    remains is the first tag and the apps' merges onto it. Two open decisions: a fairer lease in
-    the crate (FD8, item 8), and 3D Review's texture memory ("Needs Windows").
+    remains is the first tag and the apps' merges onto it. One open decision: a fairer lease in the
+    crate (FD8, item 8).
 
 The gates are in `fire-decode-plan.md` §5. Each now has both halves recorded in
 [`baselines.md`](baselines.md).
@@ -273,13 +275,13 @@ The Windows stretch was run on 11 November 2026, in order; [`baselines.md`](base
     startup gate (+1.1%) and upload frame (511 → 67 ms); the UV checker and every render
     byte-identical.
 
+**Decided:** 3D Review's texture-load gate is over its memory budget, private bytes +183 MB
+(+11.4%) against 5% on the 15-texture model: the mip chains step 7 keeps with each image, a third
+of the decoded bytes (the Mac's +3.7% footprint hid it in unified memory). Accepted by the user on
+11 November 2026, as the price of the 87% shorter upload frame.
+
 **Open:**
 
-- **3D Review's texture-load gate fails on memory:** private bytes +183 MB (+11.4%) against a 5%
-  budget, on the 15-texture model. It is the mip chains step 7 keeps with each image, a third of
-  the decoded bytes; the Mac's +3.7% footprint hid it in unified memory. Accept it as the price of
-  the 87% shorter upload frame (and say so in 3D Review's D2 budget), or drop each chain once
-  every cache showing it has uploaded.
 - **Hands-on checks** (need eyes, Explorer or Photoshop):
   - fire: Explorer thumbnails a HEIC, an AVIF, `pq_lossless.avif` (as SDR) and a cubemap DDS (every
     face) through the new `fire_shellext.dll`; the viewer draws an EXR and a PQ file through both
@@ -293,10 +295,10 @@ The Windows stretch was run on 11 November 2026, in order; [`baselines.md`](base
     some soft-edged transparency, saved with Maximize Compatibility. Compare Photoshop's view
     with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
     matte that the crate should divide out (plan §6, PSD)?
-- **The first release** (item 6): tag `v0.1.0`. Its GitHub release carries the upstream source
-  tarballs of libheif 1.23.7, libde265 1.1.3 and dav1d 1.5.4, plus the triplets (FD14). They are
-  staged in `local/release/v0.1.0/`, from vcpkg's downloads (SHA-512s as its ports pin them),
-  with `SHA256SUMS.txt`.
+- **The first release** (item 6): `v0.1.0`, `product.json`'s version, by `scripts/release.sh
+  local/release/v0.1.0`. Its GitHub release carries the upstream source tarballs of libheif
+  1.23.7, libde265 1.1.3 and dav1d 1.5.4 (staged there from vcpkg's downloads, SHA-512s as its
+  ports pin them) and the triplets (FD14).
 - **fire moves to the tag** (item 7), by merging its `fire-decode` branch, which already drops the
   three in-tree crates and carries the installer test (FD2, FD9). Then:
   - `fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "v0.1.0" }` in place of
