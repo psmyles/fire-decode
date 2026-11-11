@@ -15,7 +15,10 @@
 # pushes the tag, and creates the GitHub release with the tarballs, the committed vcpkg triplets
 # and a SHA256SUMS.txt. --dry-run stops before tagging and prints the release notes.
 #
-# Bash on macOS, and Git Bash on Windows. Needs git and gh (signed in).
+# Bash on macOS, and Git Bash on Windows. Needs git and gh (signed in). PowerShell has no `bash` on
+# its PATH; there it's  & "$env:ProgramFiles\Git\bin\bash.exe" scripts/release.sh <assets dir>
+#
+# First release: v0.1.0, 11 November 2026.
 
 set -euo pipefail
 
