@@ -5,11 +5,12 @@ members = ["crates/fire-decode", "crates/psd-sdk-sys", "crates/heif-sys"]
 exclude = ["bench/bite-import", "bench/png-to-exr"]
 
 [workspace.package]
+# What cargo needs, and only that. The product's version, description and home are set in
+# product.json, the one place they're edited; the crates carry no `version` (cargo's 0.0.0).
 edition = "2024"
 # The latest stable at the extraction (FD13); `rust-toolchain.toml` pins the same.
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/psmyles/fire-decode"
 publish = false
 
 # 3D Review's level (FD13). Every `unsafe` lives in the two -sys crates and carries a `// SAFETY:`.

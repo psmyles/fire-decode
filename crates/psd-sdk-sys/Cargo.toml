@@ -4,7 +4,6 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
-repository.workspace = true
 build = "build.rs"
 # Owns the native `fire_psd` library. 3D Review's `crates/psd` builds one by the same name with the
 # same `fire_psd_*` symbols; with `links` on both, cargo refuses a binary holding the two, rather

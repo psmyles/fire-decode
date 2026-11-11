@@ -87,6 +87,11 @@ pub use source::{HdrKind, Primaries, Sample, SourceInfo, Transfer};
 
 use options::Progress;
 
+/// This crate's version, `MAJOR.MINOR.PATCH`, from `product.json` at the repository's root: the one
+/// place it is set, and the one its release tag is named after (`v` + this). An app can report
+/// which decoder it carries with it. Cargo's own `CARGO_PKG_VERSION` is 0.0.0 and means nothing.
+pub const VERSION: &str = env!("FIRE_DECODE_VERSION");
+
 /// Upper bound on the *total* pixel buffer an animated source may hold, across all frames.
 /// Every GIF frame is a full RGBA canvas ([`AnimationFrame`]), so memory is
 /// `frames × width × height × 4` — bounding the dimensions alone leaves the frame count free to

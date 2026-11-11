@@ -1,0 +1,3 @@
+# Shell scripts keep LF everywhere: Git for Windows checks text out as CRLF (core.autocrlf), and
+# bash, Git Bash's included, can't run a script with CRLF line ends.
+*.sh text eol=lf

@@ -1,10 +1,11 @@
 [package]
 name = "fire-decode"
+# No `version`: the crate's version is set only in ../../product.json, which build.rs reads into
+# `fire_decode::VERSION`. Cargo's own stays 0.0.0, and nothing should read it.
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
-repository.workspace = true
 
 [features]
 # No default features (FD13): each app names what it uses. `psd` and `heif` need the native code in
@@ -46,6 +47,10 @@ bytemuck.workspace = true
 miniz_oxide.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
+
+# build.rs reads product.json (the version), at build time only.
+[build-dependencies]
 serde_json.workspace = true
 
 [lints]

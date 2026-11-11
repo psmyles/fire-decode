@@ -1,0 +1,8 @@
+{
+  "productName": "fire-decode",
+  "version": "0.1.0",
+  "author": "Chandan Singh",
+  "description": "The image decoder shared by Fire, 3D Review and bite: PNG, JPEG, TGA, PSD, OpenEXR, Radiance HDR, DDS, TIFF, WebP, JPEG XL, GIF, HEIF / HEIC / AVIF and more, in one Rust crate",
+  "copyright": "Copyright (c) 2026 Chandan Singh",
+  "homepage": "https://github.com/psmyles/fire-decode"
+}

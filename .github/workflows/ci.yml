@@ -13,6 +13,21 @@ on:
   pull_request:
 
 jobs:
+  # A release tag must be product.json's version, the one place it's set (scripts/release.sh tags
+  # from it; this catches a tag made by hand).
+  tag:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag is v + product.json's version
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("product.json"))["version"])')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but product.json's version is $version"; exit 1
+          fi
+
   macos:
     runs-on: macos-15
     steps:
