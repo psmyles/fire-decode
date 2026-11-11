@@ -3,7 +3,7 @@
 //!
 //! Files of every format are built here, so CI checks each; the HEIF fixtures are read from
 //! `fixtures/heif/`. Real corpora are checked too when `FIRE_DECODE_CORPUS` names them
-//! (directories, `:`-separated, walked recursively):
+//! (directories, walked recursively, listed as `PATH` is: `:`-separated, `;` on Windows):
 //!
 //!   FIRE_DECODE_CORPUS=../bite/test_images:local/corpus \
 //!     cargo test --release -p fire-decode --features psd,heif,icc,raw --test probe -- --nocapture
@@ -281,13 +281,14 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 /// The corpora `FIRE_DECODE_CORPUS` names, if any: every file that decodes must probe the same.
 #[test]
 fn every_corpus_file_probes_as_it_decodes() {
-    let Ok(dirs) = std::env::var("FIRE_DECODE_CORPUS") else {
+    let Some(dirs) = std::env::var_os("FIRE_DECODE_CORPUS") else {
         eprintln!("FIRE_DECODE_CORPUS unset: no corpus checked");
         return;
     };
     let mut files = Vec::new();
-    for d in dirs.split(':').filter(|d| !d.is_empty()) {
-        walk(Path::new(d), &mut files);
+    // The platform's list syntax, so a Windows drive letter's `:` doesn't split a path.
+    for d in std::env::split_paths(&dirs).filter(|d| !d.as_os_str().is_empty()) {
+        walk(&d, &mut files);
     }
     let mut by_format: BTreeMap<String, usize> = BTreeMap::new();
     let mut failed = 0;
