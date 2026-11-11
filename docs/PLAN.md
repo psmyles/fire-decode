@@ -301,18 +301,31 @@ of the decoded bytes (the Mac's +3.7% footprint hid it in unified memory). Accep
     some soft-edged transparency, saved with Maximize Compatibility. Compare Photoshop's view
     with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
     matte that the crate should divide out (plan §6, PSD)?
-- **fire moves to the tag** (item 7), by merging its `fire-decode` branch, which already drops the
-  three in-tree crates and carries the installer test (FD2, FD9). Then:
-  - `fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "v0.1.0" }` in place of
-    `branch = "main"`;
-  - fire's CI follows: no `-p fire-decode` in the decoder-free job, no vendored-artifact checks or
-    LLVM install in the native one (the crate brings its libraries, and bindgen is gone), and a
-    toolchain of at least 1.99, the crate's `rust-version`. Its `stable` here is 1.98.1 too, so the
-    Windows builds used `+1.99.1`, and fire's installer script, which runs plain `cargo`, needs
-    the same;
-  - fire's notices point at this repository's tree at the tag, with libheif / libde265 as
-    LGPL-3.0-or-later, not `-only` (FD14).
-- **3D Review and bite move to the tag** the same way, merging their `fire-decode` branches.
+- **The apps move to the tag** (item 7). Done on each app's `fire-decode` branch, 11 November
+  2026; each lands when the branch merges into its `main` (a fast-forward: every branch contains
+  its `main`). On each branch:
+  - `tag = "v0.1.0"` in place of `branch = "main"`, and a `Cargo.lock` regenerated with the local
+    `[patch]` out of the way, so it records `git+...?tag=v0.1.0#c68d0eba` rather than a path.
+    Nothing else moved in the lockfiles;
+  - `main` merged in first where it had moved (fire, 3D Review), resolving their `docs/PLAN.md`;
+  - checked against the tag, all `--locked`: fire's CI steps (199 workspace tests), 3D Review's
+    checks (the three known failures only) and bite's tests (367), and no binary of the three
+    imports a C runtime DLL.
+  - **fire** (`2281943`, `83d9be9`): CI follows (no `-p fire-decode`, no vendor cache or LLVM,
+    every command `--locked`). Its notices now say libheif 1.23.7 / libde265 1.1.3,
+    LGPL-3.0-or-later, relinked from this repository's tree at the tag (FD14), and its README,
+    CREDITS and architecture lose the in-tree crates, bindgen and LLVM.
+  - **3D Review** (`3c07de3`) and **bite** (`8c3c353`): only the tag and the lockfile; their
+    notices already named the tag.
+  - Builds that run plain `cargo` (fire's installer script, 3D Review's packaging and
+    `check.ps1`) need a `stable` of at least 1.99: `rustup update stable` (1.98.1 here).
+  - Each app's own decoder crates stay at its lockfile's versions (fire's `exr` 1.74.0, `lcms2`
+    6.1.1; this repository's 1.74.3 and 6.2.0): within semver, and what the Windows gates
+    measured. `cargo update -p <crate>` in an app moves one when wanted.
+- **The local `[patch]`** that built the apps against this checkout is off
+  (`D:\Dev\.cargo\config.toml.off`; the Mac's `~/Dev/.cargo/config.toml` likewise needs moving
+  aside before an app's `Cargo.lock` is updated there). Rename it back to work on the crate inside
+  an app, and out again before committing a lockfile.
 
 **Windows notes for whoever runs this again:**
 - `RUSTFLAGS="-C target-feature=+crt-static"` for anything built outside an app's tree: this
