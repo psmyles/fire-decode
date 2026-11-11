@@ -40,7 +40,7 @@
 use crate::exif::{entry_scalar, rd_u16, rd_u32};
 
 /// Map a lowercase raw file extension to a human-readable status-bar label. This is the
-/// authoritative set of extensions the decoder *routes* as camera raw; [`crate::SUPPORTED_EXTENSIONS`]
+/// authoritative set of extensions the decoder *routes* as camera raw; [`crate::all_extensions`]
 /// must list every one of them (there is a test), and the installer's `assoc\raw` associations
 /// follow from that.
 pub(crate) const EXT_LABELS: &[(&str, &str)] = &[

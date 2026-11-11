@@ -144,13 +144,16 @@ without it gets.
 `PATH` is (`:`, or `;` on Windows). psd-sdk-sys's real-file test reads `T_Sides_D.psd` from a 3D
 Review checkout beside this one.
 
-**Trying a change in an app.** Point the app at your checkout with an untracked
-`.cargo/config.toml` in a folder above both repositories:
+**Trying a change in an app.** Patch the app's dependency for one command, run in the app's
+folder with this checkout beside it:
 
-```toml
-[patch."https://github.com/psmyles/fire-decode"]
-fire-decode = { path = "/path/to/fire-decode/crates/fire-decode" }
+```sh
+cargo build --config 'patch."https://github.com/psmyles/fire-decode".fire-decode.path="../fire-decode/crates/fire-decode"'
 ```
+
+Nothing outside the app's repository is involved, so no other build picks the patch up. The
+build writes the path into the app's `Cargo.lock`: `git checkout Cargo.lock` afterwards, since a
+`--locked` build refuses a lock that names a path.
 
 **Performance.** Before a release, no format may be more than 2% slower than at the previous
 tag. `bench/decode-formats` times every format in-process. Each app has its own end-to-end
