@@ -3,9 +3,9 @@
 **Status, 11 November 2026:** the crate lives here, the repository is public, and every step is done
 on a Mac. The Windows stretch ran on 11 November: every gate passed but one, 3D Review's texture-load
 memory budget, which the user accepted. fire, 3D Review and bite each build on it on a `fire-decode`
-branch, at the first tag, `v0.1.0` (released 11 November). `v0.1.1` pins every decoder's version
-here, so the apps link what CI tests; the branches move to it, then merge. Those moves, and a few
-hands-on checks, are what remain.
+branch, at `v0.1.1` (released 11 November), which pins every decoder's version here so the apps
+link what CI tests. The branches' merges into the apps' `main`, and a few hands-on checks, are
+what remain.
 
 ## What's here
 
@@ -230,8 +230,8 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
       crate's by a test; its output is unchanged.
 
 13. **Every step is done on the Mac, and on Windows** (11 November 2026, "Needs Windows"). What
-    remains is the apps' merges onto the first tag, `v0.1.0`. One open decision: a fairer lease in the
-    crate (FD8, item 8).
+    remains is the apps' merges onto `v0.1.1`. One open decision: a fairer lease in the crate (FD8,
+    item 8).
 
 The gates are in `fire-decode-plan.md` §5. Each now has both halves recorded in
 [`baselines.md`](baselines.md).
@@ -262,6 +262,10 @@ The Windows stretch was run on 11 November 2026, in order; [`baselines.md`](base
   upstream source tarballs of libheif 1.23.7, libde265 1.1.3 and dav1d 1.5.4 (from vcpkg's
   downloads, SHA-512s as its ports pin them), the two triplets and their SHA-256s (FD14). The
   tag's CI run, with its check that the tag is `v` + `product.json`'s version, passed.
+- (6b) **`v0.1.1`** (11 November 2026), at `be6de7e`: every decoder's version pinned exactly in the
+  workspace `Cargo.toml` (README, "Decoder versions"), with `scripts/update-decoders.sh` to move
+  the pins. The same assets as `v0.1.0`; CI and the tag check passed. The user ran
+  `scripts/release.sh`: the auto-mode classifier refuses Claude creating a public tag.
 - (8) **Step 2a's Windows half:** the PSD suites (CI's job), and the four PSDs' TTFP within 2%.
 - (9) **Step 2b's Windows half:** the HEIF suites; TTFP on the HEICs, AVIFs and `grid_iphone.heic`;
   threads within the budget (`Get-Process`, as `ps -M` on the Mac).
@@ -304,30 +308,32 @@ of the decoded bytes (the Mac's +3.7% footprint hid it in unified memory). Accep
     with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
     matte that the crate should divide out (plan §6, PSD)?
 - **The apps move to the tag** (item 7). Done on each app's `fire-decode` branch, 11 November
-  2026; each lands when the branch merges into its `main` (a fast-forward: every branch contains
-  its `main`). On each branch:
-  - `tag = "v0.1.0"` in place of `branch = "main"`, and a `Cargo.lock` regenerated with the local
-    `[patch]` out of the way, so it records `git+...?tag=v0.1.0#c68d0eba` rather than a path.
-    Nothing else moved in the lockfiles;
+  2026, onto `v0.1.1`; each lands when the branch merges into its `main` (a fast-forward: every
+  branch contains its `main`). On each branch:
+  - first onto `v0.1.0`: `tag = "v0.1.0"` in place of `branch = "main"`, and a `Cargo.lock`
+    regenerated with the local `[patch]` out of the way, so it records the tag, not a path;
   - `main` merged in first where it had moved (fire, 3D Review), resolving their `docs/PLAN.md`;
-  - checked against the tag, all `--locked`: fire's CI steps (199 workspace tests), 3D Review's
-    checks (the three known failures only) and bite's tests (367), and no binary of the three
-    imports a C runtime DLL.
-  - **fire** (`2281943`, `83d9be9`): CI follows (no `-p fire-decode`, no vendor cache or LLVM,
-    every command `--locked`). Its notices now say libheif 1.23.7 / libde265 1.1.3,
-    LGPL-3.0-or-later, relinked from this repository's tree at the tag (FD14), and its README,
-    CREDITS and architecture lose the in-tree crates, bindgen and LLVM.
-  - **3D Review** (`3c07de3`) and **bite** (`8c3c353`): only the tag and the lockfile; their
-    notices already named the tag.
+  - then onto `v0.1.1` (`cargo update -p fire-decode`), whose pins set the decoders' versions.
+    At `v0.1.0` each app's lockfile still chose them, cargo reading only the app's own: fire had
+    `exr` 1.74.0 and `lcms2` 6.1.1 with Little-CMS 2.17, this repository 1.74.3 and 6.2.0 with
+    2.19. Now every pinned crate in the three lockfiles is this repository's version: what moved
+    was fire's `exr`, `lcms2`, `lcms2-sys`, `bcdec_rs`, `pxfm` and `zune-core` (and `exr`'s three
+    new Windows-only crates), 3D Review's `pxfm` and `zune-core`, and bite's `zune-core`;
+  - checked against `v0.1.1`, all `--locked`: fire's CI steps (199 workspace tests, the release
+    build), 3D Review's checks (fmt, clippy with and without `bake`, 1,219 tests with the three
+    known failures only) and bite's tests (367). fire's three binaries import no C runtime DLL,
+    and its release `fire-cli` reads a HEIC, an AVIF, a PSD, a JPEG and two OpenEXRs.
+  - **fire** (`2281943`, `83d9be9`, `5d51e70`, `fee8539`): CI follows (no `-p fire-decode`, no
+    vendor cache or LLVM, every command `--locked`). Its notices say libheif 1.23.7 / libde265
+    1.1.3, LGPL-3.0-or-later, relinked from this repository's tree at the tag (FD14); their crate
+    list matches `cargo tree` for both targets again (195 crates: asset-rules 0.2.1's toml 1.x,
+    missing since fire 0.7.0, and the rows `v0.1.1` moved). Its README, CREDITS and architecture
+    lose the in-tree crates, bindgen and LLVM.
+  - **3D Review** (`3c07de3`, `b861136`): the tag, the lockfile, and its notices' `pxfm` and
+    `zune-core` rows. **bite** (`8c3c353`, `00a183f`): the tag and the lockfile only; its
+    `THIRD_PARTY_LICENSES` names crates without versions.
   - Builds that run plain `cargo` (fire's installer script, 3D Review's packaging and
     `check.ps1`) need a `stable` of at least 1.99: `rustup update stable` (1.98.1 here).
-  - **The decoders' versions are this repository's** (`v0.1.1`). At `v0.1.0` each app's lockfile
-    still chose them, cargo reading only the app's own: fire had `exr` 1.74.0 and `lcms2` 6.1.1
-    with Little-CMS 2.17, this repository 1.74.3 and 6.2.0 with 2.19. Now the workspace
-    `Cargo.toml` pins every decoder exactly, the crates reached through another included (`png`,
-    `gif`, the `jxl-*` crates, `lcms2-sys`), and `scripts/update-decoders.sh` moves the pins.
-    General-purpose crates (`bytemuck`, `flate2`, `rayon`) keep ranges. The branches move to
-    `v0.1.1` once it's released.
 - **The local `[patch]`** that built the apps against this checkout is off
   (`D:\Dev\.cargo\config.toml.off`; the Mac's `~/Dev/.cargo/config.toml` likewise needs moving
   aside before an app's `Cargo.lock` is updated there). Rename it back to work on the crate inside
