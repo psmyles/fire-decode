@@ -6,7 +6,8 @@ yet: each app decodes as it does today.
 - **macOS half:** recorded 10 November 2026, below.
 - **Windows half:**
   - 3D Review's is in its own `docs/PLAN.md` (4 November 2026).
-  - fire's and bite's are still to do (`docs/PLAN.md`, "Needs Windows").
+  - fire's and bite's were recorded 11 November 2026, with every later step's Windows gate, in
+    "Windows" at the end of this file.
 
 ## The machine and the builds
 
@@ -646,3 +647,347 @@ the Quick Look thumbnail of the HEIC plane is byte-identical to step 4's.
 passes but `a_classic_material_imports_as_a_dielectric` (fails on `main` too) and two
 `every_fixture_the_suite_loads_exists`, for models this Mac doesn't have
 (`stylized_palm_plant_04.fbx`, `SM_column04.fbx`); clippy clean.
+
+## Windows
+
+11 November 2026: step 0's Windows baselines, then every step's Windows gate, in the order of
+`docs/PLAN.md`'s "Needs Windows". The raw files are in the untracked `local/` (Windows names carry
+`windows`).
+
+### The machine and the builds
+
+- **Machine:** AMD Ryzen 9 7900 (12 cores, 24 threads), 64 GB, NVIDIA GeForce RTX 4080, Windows 11
+  Enterprise 10.0.26300. The crate's budget here is 22 threads (the cores less two).
+- **Toolchain:** Rust 1.99.1 for everything built against the crate, MSVC 19.44 (Visual Studio
+  2022). The step 0 baselines were built as they shipped: fire `710b3f6` on its pinned `stable`
+  (1.98.1) with the DLL runtime, bite `b511984` likewise.
+- **The apps on the crate** build against this checkout through an untracked
+  `D:\Dev\.cargo\config.toml` `[patch]`, as `~/Dev/.cargo/config.toml` does on the Mac.
+- **Intermediate steps**, for the gates that compare against them, were built in worktrees with
+  this repository's Windows libraries copied in, `crt-static`, and `--config` pointing the patch at
+  that step's crate: fire step 3 (`f45b210` on `1e93600`), fire step 6d (`94bc48e` on `3f62b4b`),
+  and `bench/decode-formats` on step 2b (`34c48f8`).
+- **Baseline binaries** are kept in `local/bin/` with `.exe` names: `fire-710b3f6.exe` (and a
+  copy for the A/A run), `fire-cli-710b3f6.exe`, `fire_shellext-710b3f6.dll`, `bite-b511984.exe`,
+  `bite-gui-b511984.exe`, `bite-import-b511984.exe`; then `fire-win-step3.exe`,
+  `fire-win-step6d.exe` and `fire-win-837c1d3.exe` (fire's branch with step 7 and the static CRT).
+- **The corpus** is the Mac's (`local/corpus`, `local/bite-corpus`, bite's `test_images`). The
+  Mac's `bite-corpus` holds symlinks to `/Users/...`; on Windows they are copies.
+
+### Step 0: fire's time to first pixel
+
+`scripts/ttfp.ps1`, fire `710b3f6` against a copy of itself, 12 interleaved launches each
+(`local/ttfp-windows-710b3f6.csv`; the driver with the file sets is `local/ttfp-run.ps1`):
+
+| File | Median (ms, 24 launches) | sd | Gap between the two identical runs |
+| --- | --- | --- | --- |
+| `28-4928x3264.jpg` | 222.3 | 14.1 | 0.3% |
+| `58-1280x853.jpg` | 179.8 | 4.5 | 0.5% |
+| `T_Clock_D.jpg` | 185.8 | 3.9 | 0.4% |
+| `T_CliffRock_01_N.png` | 213.1 | 13.2 | 4.5% |
+| `T_DeadTree_03_N.png` | 180.4 | 2.3 | 0.4% |
+| `Explosion02HD_5x5.tga` | 186.2 | 3.3 | 1.0% |
+| `FireBall02_8x8.tga` | 179.5 | 2.6 | 0.5% |
+| `IMG_2131.HEIC` | 232.7 | 9.4 | 0.9% |
+| `IMG_2135.HEIC` | 344.1 | 6.8 | 0.7% |
+| `IMG_2139.HEIC` | 225.8 | 8.6 | 1.6% |
+| `IMG_2131.avif` | 225.1 | 8.9 | 1.0% |
+| `T_CliffRock_01_N.exr` | 249.1 | 6.7 | 1.7% |
+| `T_Sides_D.psd` | 180.6 | 4.6 | 0.4% |
+
+**Reading it:** quieter than the Mac. The small files' sd is 2-5 ms and identical binaries agree
+within 1% on most files, so 2% is resolvable at 12 launches here. Two files are bimodal: the 4K
+PNG (sd 13 ms, 4.5% apart) and the 15 MP JPEG (sd 14 ms; in a later session it sat at 242 ms with
+sd 4). Those two get 30 launches before any call is made on them.
+
+### Step 0: bite's cold and warm import
+
+`bench/bite-import` built against bite `b511984` (`local/bin/bite-import-b511984.exe`),
+`BITE_MAGICK` the bundled `resources\win\magick\magick.exe`, median of 3
+(`local/bite-import-windows-b511984.jsonl`; the driver is `local/bite-import-run.sh`):
+
+| Format | Files | Cold (ms) | `magick` processes, cold | Warm (ms) | `magick` processes, warm |
+| --- | --- | --- | --- | --- | --- |
+| PNG | 5 | 791 | 1 | 3 | 0 |
+| TGA | 8 | 496 | 1 | 4 | 0 |
+| JPG | 23 | 699 | 3 | 8 | 0 |
+| PSD | 2 | 188 | 1 | 117 | 2 |
+| EXR | 2 | 864 | 1 | 765 | 2 |
+| HEIC | 3 | 800 | 1 | 749 | 3 |
+| AVIF | 3 | 1,640 | 1 | 1,582 | 3 |
+
+The Mac's pattern: a warm re-import of PSD, EXR, HEIC or AVIF costs nearly a cold one, one
+`magick identify` per file. Every file thumbnailed and decoded.
+
+### Step 0: import tables
+
+`llvm-readobj --coff-imports` on the release builds:
+
+| Binary | Bytes | Runtime DLLs imported |
+| --- | --- | --- |
+| `fire.exe` (`710b3f6`) | 14,532,096 | `MSVCP140`, `VCRUNTIME140`, `VCRUNTIME140_1`, 11 `api-ms-win-crt-*` |
+| `fire-cli.exe` | 11,308,544 | `MSVCP140`, `VCRUNTIME140`, `VCRUNTIME140_1`, 9 `api-ms-win-crt-*` |
+| `fire_shellext.dll` | 9,208,320 | `MSVCP140`, `VCRUNTIME140`, `VCRUNTIME140_1`, 8 `api-ms-win-crt-*` |
+| `bite-gui.exe` (`b511984`) | 9,908,224 | `VCRUNTIME140`, 8 `api-ms-win-crt-*` |
+| `bite.exe` | 3,449,344 | `VCRUNTIME140`, 5 `api-ms-win-crt-*` |
+
+As FD20 expected: bite imports only `VCRUNTIME140`, fire `MSVCP140` too.
+
+### The Windows HEIF stack and CI's Windows job
+
+- **Re-vendored** from vcpkg `e529425f2f` with the committed triplet: libheif 1.23.7, libde265
+  1.1.3, dav1d 1.5.4, MSVC 19.44, `/MT`, stripped (`5c43b53`). The headers are the macOS ones
+  byte for byte (the same git tree). VENDOR.txt's checks all pass (`f585dcd`).
+- **CI's Windows job** runs the macOS job's steps with `crt-static` in its own `RUSTFLAGS`. Run
+  locally first: fmt and clippy clean on all four sets; tests 175 / 198 / 225 / 242 / 253, the
+  macOS counts; psd-sdk-sys 18 plus its real-file test, which finds `T_Sides_D.psd` in
+  `../3d-review-rs`. The macOS job's check still sees the named error without `crt-static`.
+
+### fire on the static CRT
+
+fire's `fire-decode` branch with `crt-static` in `.cargo/config.toml` (`837c1d3`), release:
+
+| Binary | Bytes | Runtime DLLs imported |
+| --- | --- | --- |
+| `fire.exe` | 15,791,104 | none |
+| `fire-cli.exe` | 11,992,064 | none |
+| `fire_shellext.dll` | 9,887,744 | none |
+
+Each now imports only OS DLLs. fire's 199 tests pass (the Mac's 193 plus fire-shellext's
+Windows-only ones), and clippy is clean with and without default features.
+
+### Steps 1, 2a, 2b and 3: TTFP against step 0
+
+`fire-win-837c1d3.exe` (every step, the static CRT) against `fire-710b3f6.exe`, 12 launches each
+(`local/ttfp-windows-837c1d3.csv`):
+
+| File | Step 0 (ms) | Now (ms) | Change |
+| --- | --- | --- | --- |
+| `28-4928x3264.jpg` | 209.2 | 217.7 | +4.1% (30 launches: -0.3%) |
+| `58-1280x853.jpg` | 181.1 | 179.5 | -0.9% |
+| `T_Clock_D.jpg` | 184.4 | 185.9 | +0.8% (30 launches: -0.4%) |
+| `T_CliffRock_01_N.png` | 218.3 | 214.1 | -1.9% |
+| `T_DeadTree_03_N.png` | 179.8 | 180.3 | +0.2% |
+| `Explosion02HD_5x5.tga` | 185.2 | 183.9 | -0.7% |
+| `FireBall02_8x8.tga` | 179.7 | 179.5 | -0.1% |
+| `IMG_2131.HEIC` | 224.7 | 215.8 | -4.0% |
+| `IMG_2135.HEIC` (48 MP) | 342.5 | 263.8 | -23.0% |
+| `IMG_2139.HEIC` (portrait) | 229.5 | 224.1 | -2.4% |
+| `IMG_2131.avif` | 220.2 | 219.4 | -0.3% |
+| `IMG_2135.avif` | 280.1 | 257.3 | -8.1% |
+| `IMG_2139.avif` | 228.7 | 217.0 | -5.1% |
+| `grid_iphone.heic` | 185.6 | 186.0 | +0.2% |
+| `T_CliffRock_01_N.exr` | 247.2 | 250.9 | +1.5% |
+| `T_CliffRock_02_N.exr` | 250.6 | 250.0 | -0.2% |
+| `T_Sides_D.psd` | 179.2 | 179.3 | +0.0% |
+| `T_Noise_Burshed_01_M.psd` | 185.1 | 185.9 | +0.4% |
+| `rgb16_4096.psd` | 215.0 | 213.9 | -0.5% |
+| `big_rgba8_8192.psd` | 354.8 | 346.7 | -2.3% |
+
+Every file within 2% or faster, so this covers the TTFP halves of steps 1, 2a (the four PSDs), 2b
+(the HEICs, AVIFs and `grid_iphone.heic`) and 3. The one file over at 12 launches is the bimodal
+JPEG, -0.3% at 30 (`local/ttfp-windows-837c1d3-jpg-n30.csv`). HEIC and AVIF are faster: the
+budget gives libheif 22 threads here. An AVIF decodes, so dav1d is linked.
+
+### Step 2b: threads (FD8)
+
+`IMG_2135.HEIC` (9×5 tiles) and its AVIF, three decodes per budget in one process
+(`local/threadcheck`). `Get-Process` sampled the thread count every ~2 ms against the count while
+idle, and CPU time came from `TotalProcessorTime` over the decodes' wall time:
+
+| Budget | HEIC: threads added | HEIC: cores busy | HEIC: ms | AVIF: threads added | AVIF: cores busy | AVIF: ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 2 | 1.0 | 750 | 0 | 1.0 | 485 |
+| 2 | 4 | 1.9 | 422 | 2 | 1.7 | 307 |
+| 4 | 8 | 3.0 | 258 | 4 | 2.6 | 211 |
+| 8 | 16 | 4.9 | 187 | 8 | 3.5 | 187 |
+| the budget (22) | 44 | 9.7 | 152 | 22 | 4.3 | 181 |
+
+The Mac's shape: the grid takes 2N threads (a tile thread and libde265's worker for each), the AVIF
+exactly N, and busy cores stay within the budget.
+
+### Step 3: the per-format bench, `probe()`, fire-cli
+
+**Per-format decode** (`bench/decode-formats`, fire's setup, median of 15, the median of three
+interleaved rounds), step 2b (`34c48f8`, `--features old-api`) against this checkout, over the
+Mac's 47 files (`local/bench-windows-*.tsv`):
+
+| Format | Files | Step 2b (ms, sum) | Now (ms, sum) | Change |
+| --- | --- | --- | --- | --- |
+| JPEG | 23 | 946.0 | 946.6 | +0.1% |
+| PNG | 5 | 217.2 | 216.7 | -0.2% |
+| TGA | 8 | 17.9 | 17.8 | -0.2% |
+| PSD | 3 | 264.9 | 261.9 | -1.1% |
+| OpenEXR | 2 | 176.7 | 176.3 | -0.2% |
+| HEIC | 3 | 416.3 | 297.2 | -28.6% |
+| AVIF | 3 | 423.7 | 365.4 | -13.8% |
+
+No format slower. Building the bench on step 2b needs its `new-api` feature deleted from the copy:
+cargo checks a feature's dependency features even when it is off.
+
+**`probe()` against `decode()`** (`tests/probe.rs`, `FIRE_DECODE_CORPUS` over bite's
+`test_images`, `local/corpus`, 3D Review's and fire's `assets`, and CrimeCrew's and
+CrimeCrew-Research's `Assets`): 1,937 images decode, and every one probes at the size and format
+`decode()` returns: 1,596 PNG, 125 TGA, 90 PSD, 53 OpenEXR, 49 JPEG, 8 Radiance HDR, 3 each of
+HEIC, AVIF, DDS, ICO and TIFF, 1 BMP. The test split the variable on `:`, which cut a Windows path
+at its drive letter; it now uses `split_paths` (`7ea7759`).
+
+**fire-cli and Asset Check:** fire's tests include the rotated JPEG. Asset Check over CrimeCrew's
+1,137 textures (`check --files-from --rules exp-content-rules/rules.json`, on `develop`) with
+`fire-cli-710b3f6.exe` and `fire-cli-win-837c1d3.exe`: the results files are byte-identical (733
+checked after the rules' skips, 474 warnings, and the same one unreadable file, a truncated TIFF).
+CrimeCrew has no rotated JPEG, so nothing changed.
+
+**fire-shellext** (`local/shellext-thumb.ps1` loads the DLL and drives its thumbnail provider as
+Explorer does, through `IInitializeWithStream`, without registering it): `IMG_2139.HEIC` 192×256,
+upright; `IMG_2131.avif` 256×192 (`local/win/thumbs/`). Explorer itself is a hands-on check.
+
+### Step 4: 3D Review on fire-decode
+
+Release builds of `746f64b` (step 0), `544c20b` (step 4 plus the gate's texture measures) and
+`b653de2` (the branch head, step 7), all with Rust 1.99.1 and `crt-static` (3D Review's D25).
+
+**Sizes and imports:**
+
+| Binary | Step 0 (bytes) | Step 7 (bytes) | Runtime DLLs imported |
+| --- | --- | --- | --- |
+| `3d-review.exe` | 21,530,112 | 33,405,440 (+11.9 MB) | none, at both |
+| `review3d-cli.exe` | 4,909,056 | 6,471,168 (+1.6 MB) | none, at both |
+| `review_shell.dll` (`release-shell`) | 8,119,808 | 16,214,528 (+8.1 MB) | none, at both |
+
+The OS DLLs each imports are the same lists as at step 0. The growth is the HEIF stack and the
+formats 3D Review didn't read, as on the Mac (+7.6 MB there).
+
+**The startup gate**, `scripts/gate.ps1 -Runs 15`, on `SM_Wall_Break_4x3m.fbx` (the Mac's fixture:
+the Windows step 0 baseline's `Bot.fbx` is no longer on this machine)
+(`local/gate-3d-review-windows-step4.txt`):
+
+| Measure | Step 0 | Step 4 | Change | Budget |
+| --- | --- | --- | --- | --- |
+| startup (ms) | 205.7 | 197.7 | -8.1 (-3.9%) | +10 |
+| frame (ms) | 0.422 | 0.432 | +0.010 | +0.3 |
+| private (MB) | 233.3 | 233.4 | +0.0% | +5% |
+| GPU (MB) | 155.5 | 155.6 | +0.1% | +5% |
+
+Passed.
+
+**`scripts/check.ps1`** (with `RUSTUP_TOOLCHAIN=1.99.1`: `stable` here is 1.98.1, below the
+workspace's 1.99): fmt, clippy, clippy with `bake` and the shader bytecode check pass. Tests, with
+`--no-fail-fast` because the script stops at the first failing binary: 1,219 pass and 3 fail, the
+Mac's three. `a_classic_material_imports_as_a_dielectric` fails on `main` too, and two
+`every_fixture_the_suite_loads_exists` want models this machine doesn't have. The audit's
+`real_models` suite skips here for the same reason.
+
+**HEIC and AVIF textures:** two FBX planes made with Blender 5.2 headless
+(`local/win/make_fixtures.py`), each embedding `IMG_2131` as its base colour, one as HEIC and one
+as AVIF.
+- Through the viewer's renderer: `review-snapshot` draws the photo on both
+  (`local/win/snap/planes-*.png`).
+- Through the Explorer DLL's thumbnail provider, driven by `local/shellext-thumb.ps1` with 3D
+  Review's CLSID: both thumbnails show the photo (`local/win/thumbs/3dr-*.png`).
+
+Explorer's own thumbnail and preview pane are hands-on.
+
+**Shell panics:** the guards (`guard.rs`, `host.rs`) are unchanged since step 0, and
+`release-shell` still unwinds.
+
+**Asset Check and a `review3d-cli` panic:** a release Rust binary that panics exits 101. The rules
+repository's own `ac_run_checker` (`hooks/common.sh`), run in a scratch repository with that
+binary as `review3d-cli`, records a `tool.failed` finding ("3D Review's checker didn't run ... exit
+code 101", with the panic message) and sets `ac_found`, so the window opens.
+
+### Step 5: bite on fire-decode
+
+bite's `fire-decode` branch (`01ee7ff`), `crt-static` from its `.cargo/config.toml`, Rust 1.99.1.
+
+**Builds and imports:**
+
+| Binary | Step 0 (bytes) | Step 5 (bytes) | Runtime DLLs imported |
+| --- | --- | --- | --- |
+| `bite-gui.exe` | 9,908,224 | 19,629,568 | none (was `VCRUNTIME140`, 8 `api-ms-win-crt-*`) |
+| `bite.exe` | 3,449,344 | 13,514,752 | none (was `VCRUNTIME140`, 5 `api-ms-win-crt-*`) |
+
+**Tests:** 367 pass, 0 fail (the Mac ran 373). bite-imagemagick's ImageMagick tests run against
+the bundled `magick.exe`: none skipped.
+
+**Cold and warm import**, `bench/bite-import` against `b511984` and the branch, alternating, 5
+repetitions, median (`local/bite-import-windows-step5.jsonl`):
+
+| Format | Files | Cold before (ms) | Cold after (ms) | Change | `magick`, cold | Warm before (ms) | Warm after (ms) | `magick`, warm |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| PNG | 5 | 789 | 143 | -82% | 1 → 0 | 3 | 2 | 0 → 0 |
+| TGA | 8 | 502 | 44 | -91% | 1 → 0 | 4 | 3 | 0 → 0 |
+| JPG | 23 | 704 | 699 | -1% | 3 → 3 | 8 | 5 | 0 → 0 |
+| PSD | 2 | 188 | 38 | -80% | 1 → 0 | 117 | 2 | 2 → 0 |
+| EXR | 2 | 866 | 213 | -75% | 1 → 0 | 770 | 2 | 2 → 0 |
+| HEIC | 3 | 800 | 227 | -72% | 1 → 0 | 750 | 1 | 3 → 0 |
+| AVIF | 3 | 1,626 | 194 | -88% | 1 → 0 | 1,578 | 1 | 3 → 0 |
+
+Every routed format faster cold, no `magick` process on any warm re-import, JPG unchanged. No
+file failed. The bench needs `RUSTFLAGS=-C target-feature=+crt-static`: it builds outside bite's
+tree, so bite's `.cargo/config.toml` doesn't reach it.
+
+**The installer:** `cargo xtask package-windows` (with `RUSTUP_TOOLCHAIN=1.99.1`) builds
+`dist/bite-0.5.3.exe` (19.65 MB). Its script installs `THIRD_PARTY_LICENSES` from the branch,
+which lists libheif, libde265, dav1d, libwebp and psd_sdk with the LGPL relink terms; the task
+refuses to build without it. Installing it and importing a HEIC folder are hands-on.
+
+### Step 6: tone curves, PQ / HLG, gain maps, sequences
+
+- **fire's TTFP on the SDR HEICs**, step 3 (`fire-win-step3.exe`) against step 6d
+  (`fire-win-step6d.exe`), 12 launches each (`local/ttfp-windows-step6.csv`): `IMG_2131` -1.5%,
+  `IMG_2135` -0.7%, `IMG_2139` +1.8%, `grid_iphone` +0.4%. Within 2%.
+- **The regenerated HLSL compiles:** fire's release build runs `fxc` on the committed
+  `shader_viewport_hlsl5_*.hlsl`, which carries step 6a's two clamps, into `fragment.dxbc` /
+  `vertex.dxbc`.
+- **fire-shellext and PQ:** `pq_lossless.avif` thumbnails as SDR through the new DLL: the grey
+  ramp reaches white and the colours are saturated. The step 0 DLL shows the flat, dark raw signal
+  (`local/win/thumbs/pq_lossless.avif*.png`).
+- **The viewer reaches a first frame** on Direct3D 11 for `pq_lossless.avif`,
+  `hlg_lossless.heic`, `seq_hevc.heif` and `seq_infinite.avif`. Tone curves, the HDR toggle and
+  playback are hands-on.
+
+### Step 7: the `mips` feature
+
+**fire's TTFP**, step 6d against `fire-win-837c1d3.exe`, step 0's 13 files, 12 launches each
+(`local/ttfp-windows-step7.csv`): from -1.6% to +3.2%. The three over 2% again at 30 launches
+(`local/ttfp-windows-step7-n30.csv`), with `T_DeadTree_03_N.png` as a control:
+
+| File | Step 6d (ms) | Step 7 (ms) | Change |
+| --- | --- | --- | --- |
+| `T_CliffRock_01_N.png` | 215.3 | 214.5 | -0.4% |
+| `IMG_2139.HEIC` | 220.6 | 218.5 | -0.9% |
+| `IMG_2131.avif` | 218.7 | 222.5 | +1.7% |
+| `T_DeadTree_03_N.png` | 179.0 | 178.6 | -0.2% |
+
+Within 2%, the OpenEXR included (+0.5%).
+
+**3D Review's startup gate**, `544c20b` against `b653de2`, 15 runs
+(`local/gate-3d-review-windows-step7.txt`): startup 195.2 → 197.4 ms (+1.1%), frame -0.003 ms,
+private -0.2%, GPU -0.0%. Passed.
+
+**3D Review's texture-load gate** on `local/win/textures15.fbx`, rebuilt from the Mac's
+description (eight planes, each naming a 4-5K photo, a 1-4K normal map and a 1-2K roughness map in
+bite's `test_images` by absolute path: 15 images, 24 bindings), 15 runs
+(`local/gate-3d-review-windows-step7-textures.txt`):
+
+| Measure | `544c20b` | `b653de2` | Change | Budget |
+| --- | --- | --- | --- | --- |
+| The frame that uploads them | 510.7 ms | 67.3 ms | -87% | - |
+| Frames while they load, median | 0.447 ms | 0.580 ms | +0.13 ms | - |
+| Frames while they load, longest | 23.9 ms | 24.8 ms | +3.8% | - |
+| Steady frame | 0.318 ms | 0.347 ms | +0.030 ms | +0.3 |
+| Private bytes | 1,609 MB | 1,791 MB | +183 MB (+11.4%) | **+5%: over** |
+| GPU bytes | 922 MB | 922 MB | -0.0% | +5% |
+
+**The gate fails on memory.** The +183 MB is a third of the 15 decoded images (about 590 MB at
+RGBA8): their mip chains, which step 7 keeps with each image so that the material slot, the Tex
+viewport and the UV view share one. Before, each chain was built at upload and dropped. The Mac
+measured +3.7% footprint for the same change, but its footprint counts unified GPU memory in the
+base; Windows' private bytes count only the CPU side, where the chains live.
+
+**Nothing else moved:** `review-snapshot` renders of the HEIC / AVIF planes and the 15-texture
+model (`shaded`), and of `SM_Wall_Break_4x3m.fbx` and `monkey.fbx` under the UV checker
+(`checker`), are byte-identical between `544c20b` and `b653de2` (`local/win/snap/`), so the
+Windows build of the UV-checker bake draws as before. 3D Review's `tests/bake_mips.rs`, which
+holds the bake's filter to the crate's, passes (7 tests, in the `--no-fail-fast` run).

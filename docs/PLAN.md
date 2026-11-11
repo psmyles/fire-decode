@@ -1,9 +1,10 @@
 # fire-decode - Work Plan
 
-**Status, 10 November 2026:** the crate lives here now (step 1's Mac part), the repository is public,
-and steps 2a to 6 are done on a Mac. fire, 3D Review and bite each build on it on a `fire-decode`
-branch, which merges when they move to the first tag. Everything that needs Windows is collected in
-"Needs Windows", kept current as the Mac work goes, to be done in one stretch afterwards.
+**Status, 11 November 2026:** the crate lives here, the repository is public, and every step is done
+on a Mac. The Windows stretch ran on 11 November: every gate passed but one, 3D Review's texture-load
+memory budget ("Needs Windows", open). fire, 3D Review and bite each build on it on a `fire-decode`
+branch, which merges when they move to the first tag. That tag, and a few hands-on checks, are what
+remain.
 
 ## What's here
 
@@ -224,125 +225,97 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
     - **the UV-checker bake** keeps its own copy of the filter (`build/mips.rs`), held to the
       crate's by a test; its output is unchanged.
 
-13. **Every step is done on the Mac.** What remains is the Windows stretch below, then the first
-    tag (item 6) and the apps' merges onto it. One open decision: a fairer lease in the crate
-    (FD8, item 8).
+13. **Every step is done on the Mac, and on Windows** (11 November 2026, "Needs Windows"). What
+    remains is the first tag and the apps' merges onto it. Two open decisions: a fairer lease in
+    the crate (FD8, item 8), and 3D Review's texture memory ("Needs Windows").
 
-The gates are in `fire-decode-plan.md` §5. On a Mac only their macOS halves can pass, so record each
-gate as "macOS passed; Windows pending".
+The gates are in `fire-decode-plan.md` §5. Each now has both halves recorded in
+[`baselines.md`](baselines.md).
 
-## Needs Windows (later)
+## Needs Windows
 
-The Windows stretch, in order. Each item names what it unblocks.
+The Windows stretch was run on 11 November 2026, in order; [`baselines.md`](baselines.md),
+"Windows", has every number. Commits are local until pushed.
 
-1. **Step 0's Windows baselines.** Take them before anything changes fire or bite on Windows.
-   - **fire TTFP** with `scripts/ttfp.ps1`, from fire `710b3f6`, over the same 13 files as the macOS
-     baseline (`docs/baselines.md`; the derived AVIF / EXR files are in the Mac's `local/corpus/`).
-     Keep a copy of the baseline `fire.exe` for the A/B later.
-   - **bite:** cold and warm import by format with `bench/bite-import`, and `BITE_MAGICK` set to the
-     bundled `magick.exe`. Also `bite-gui.exe`'s and `bite.exe`'s import tables (FD20 expects only
-     `VCRUNTIME140`).
-   - 3D Review's Windows baselines are done (its `docs/PLAN.md`).
-2. **Re-vendor the Windows HEIF stack** (FD16, FD20), from the same vcpkg baseline as macOS
-   (`crates/heif-sys/vendor/VENDOR.txt` has the recipe):
-   - `vcpkg install "libheif[core,dav1d,libde265]:x64-windows-fire-decode"` with
-     `--overlay-triplets=crates/heif-sys/vendor/triplets --binarysource=clear`. The triplet is
-     committed: static libraries, /MT, release only, no plugin loading.
-   - Strip with `llvm-objcopy --strip-debug`, and copy `include/libheif` and the three libraries to
-     `crates/heif-sys/vendor/x64-windows/`. Check the library names against `build.rs`, which links
-     `heif`, `libde265` and `dav1d`.
-   - Run VENDOR.txt's checks: codec references, no `LoadLibrary`, `/DEFAULTLIB:LIBCMT` (not
-     `MSVCRT`), no encoders.
-   - Update VENDOR.txt and `THIRD-PARTY-NOTICES.md` with the Windows versions, and commit the
-     libraries alone in one commit.
-3. **CI's Windows job** (FD13): fmt, clippy and tests for the four sets the macOS job runs (core,
-   psd, psd + heif, psd + heif + icc + raw) on `windows-latest`, with `crt-static`. Its `.cargo/config.toml` or `RUSTFLAGS` must not reach the macOS job's
-   "heif without crt-static is a named error" check.
-4. **fire on the static CRT** (FD20): `-C target-feature=+crt-static` for `x86_64-pc-windows-msvc` in
-   fire's `.cargo/config.toml`. Check that nothing prebuilt is `/MD`, and that `fire.exe`,
-   `fire-cli.exe` and `fire_shellext.dll` import no `MSVCP140`, `VCRUNTIME140*` or
-   `api-ms-win-crt-*`.
-5. **Step 1's Windows gate**, with fire built against this repository (as on the Mac,
-   `docs/baselines.md`):
-   - fire's tests pass;
-   - TTFP within 2% per format against item 1's baseline, HEIC / AVIF included;
-   - fire-shellext thumbnails a HEIC;
-   - an AVIF decodes (dav1d linked).
-6. **The first release:** tag `v0.1.0`. Its GitHub release carries the upstream source tarballs of
-   libheif 1.23.7, libde265 1.1.3 and dav1d 1.5.4, plus the triplets (FD14). The tarballs can be
-   fetched anywhere; the tag waits for item 2.
-7. **fire moves to the tag**, by merging its `fire-decode` branch, which already drops the three
-   in-tree crates and carries the installer test (FD2, FD9). Then:
-   - `fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "v0.1.0" }` in place of
-     `branch = "main"`;
-   - fire's CI follows: no `-p fire-decode` in the decoder-free job, no vendored-artifact checks or
-     LLVM install in the native one (the crate brings its libraries, and bindgen is gone), and a
-     toolchain of at least 1.99, the crate's `rust-version`. fire's `stable` here is 1.98.1, so the
-     Mac builds used `cargo +1.99.1`;
-   - fire's notices point at this repository's tree at the tag, with libheif / libde265 as
-     LGPL-3.0-or-later, not `-only` (FD14).
+**Done:**
 
-8. **Step 2a's Windows half:** psd-sdk-sys's tests and fire-decode's `tests/psd.rs` (CI's Windows
-   job covers both), and fire's TTFP on the four PSDs in `docs/baselines.md` against item 1's
-   baseline binary.
+1. **Step 0's Windows baselines:** fire's TTFP over the 13 files (identical binaries within 1% on
+   most), bite's cold and warm imports, and the import tables (fire `MSVCP140` and
+   `VCRUNTIME140*`; bite only `VCRUNTIME140`). The baseline binaries are in `local/bin/`.
+2. **The Windows HEIF stack** re-vendored from the same vcpkg baseline, `/MT`, stripped
+   (`5c43b53`): libheif 1.23.7, libde265 1.1.3, dav1d 1.5.4. VENDOR.txt's checks pass, and
+   VENDOR.txt and the notices record it (`f585dcd`).
+3. **CI's Windows job** (`f585dcd`), run locally: clippy clean on all four sets, tests 175 / 198 /
+   225 / 242 / 253. Not yet run on GitHub: it runs on the first push.
+4. **fire on the static CRT** (fire `837c1d3`, its `fire-decode` branch): `fire.exe`,
+   `fire-cli.exe` and `fire_shellext.dll` import no runtime DLL.
+5. **Step 1's Windows gate:** fire's 199 tests pass; TTFP within 2% or faster on every format
+   against step 0 (HEIC up to 23% faster); fire-shellext thumbnails a HEIC and an AVIF (driven
+   directly, not yet through Explorer); an AVIF decodes.
+8. **Step 2a's Windows half:** the PSD suites (CI's job), and the four PSDs' TTFP within 2%.
+9. **Step 2b's Windows half:** the HEIF suites; TTFP on the HEICs, AVIFs and `grid_iphone.heic`;
+   threads within the budget (`Get-Process`, as `ps -M` on the Mac).
+10. **Step 3's Windows half:** fire-shellext compiles and thumbnails a HEIC; TTFP per format;
+    `bench/decode-formats` against step 2b, no format slower (HEIC -29%, AVIF -14%); `probe()`
+    equals `decode()` on 1,937 corpus images, CrimeCrew's included (the test's corpus list now
+    takes Windows paths, `7ea7759`); fire-cli's tests, and Asset Check over CrimeCrew's textures
+    with byte-identical results.
+11. **Step 4's Windows half:** 3D Review's import tables (no runtime DLL, OS DLLs unchanged), its
+    startup gate (-3.9%) and `check.ps1` (the Mac's three known failures); HEIC / AVIF textures
+    through `review-snapshot` and through the Explorer DLL's thumbnail provider; the shell guards
+    unchanged; and Asset Check's hook reports a panic's exit code 101 as `tool.failed`.
+12. **Step 5's Windows half:** bite builds with `crt-static` (no runtime DLL); its 367 tests pass
+    against the bundled `magick.exe`; every routed format imports 72-91% faster cold, with no
+    `magick` on a warm re-import; the installer ships the new `THIRD_PARTY_LICENSES`.
+13. **Step 6's Windows half:** the regenerated HLSL compiles; SDR HEIC TTFP within 2% of step 3;
+    fire-shellext thumbnails `pq_lossless.avif` as SDR; the PQ, HLG and sequence fixtures open.
+14. **Step 7's Windows half:** fire's TTFP within 2% of step 6d, the OpenEXRs included; 3D Review's
+    startup gate (+1.1%) and upload frame (511 → 67 ms); the UV checker and every render
+    byte-identical.
 
-9. **Step 2b's Windows half:**
-   - `tests/heif_fixtures.rs` and fire-decode's HEIF tests (CI's Windows job);
-   - fire's TTFP on the three iPhone HEICs, their AVIFs and `grid_iphone.heic`, against item 1's
-     baseline;
-   - the thread check on `IMG_2135.HEIC`. There's no `ps -M` on Windows: count threads with
-     Process Explorer or `Get-Process`;
-   - fire-shellext thumbnails a HEIC through ABI v2.
+**Open:**
 
-10. **Step 3's Windows half** (fire's `fire-decode` branch, or `main` after item 7):
-    - **fire-shellext compiles:** its decode call changed and only builds on Windows. It thumbnails
-      a cubemap DDS with every face, and a HEIC, in Explorer;
-    - **fire's TTFP** per format against item 1's baseline. The budget's size depends on the
-      machine's cores (the cores less two, at least `min(cores, 8)`), so check the HEICs especially;
-    - **the per-format bench:**
-      - `bench/decode-formats` against step 2b, built in a worktree of `34c48f8` with
-        `--features old-api`, over fire's validation set;
-      - no format more than 2% slower;
-    - **`tests/probe.rs` with `FIRE_DECODE_CORPUS`** pointing at fire's validation set;
-    - **fire-cli's tests**, the rotated JPEG included, and Asset Check over CrimeCrew's textures
-      with the same results as before, apart from rotated JPEGs now reporting their stored size.
-11. **Step 4's Windows half**: 3D Review's `docs/PLAN.md`, "Needs Windows". Its startup gate and
-    import tables, HEIC / AVIF in the viewer and Explorer, and Asset Check reading a
-    `review3d-cli` panic's exit code 101 as the tool failing.
-12. **Step 5's Windows half** (bite's `fire-decode` branch; it needs item 2's libraries):
-    - **It builds:** `bite-gui.exe` and `bite.exe` with `crt-static`. Their import tables show no
-      `MSVCP140`, `VCRUNTIME140*` or `api-ms-win-crt-*` (step 0 expected `VCRUNTIME140`, before
-      the static CRT).
-    - **bite's tests** pass, the ImageMagick ones included, against the bundled `magick.exe`.
-    - **Cold and warm import by format:** `bench/bite-import` with `BITE_MAGICK` set to the
-      bundled `magick.exe`, against item 1's baseline. Every routed format faster cold, and no
-      `magick` process on a warm re-import of PNG / TGA / PSD / EXR / HEIC / AVIF.
-    - **The installer** (`cargo xtask package-windows`) ships the new `THIRD_PARTY_LICENSES`. A
-      HEIC folder imports through the HEIC chip in the installed app.
-    - **A transparent PSD saved by Photoshop:** a layered document with no Background layer and
-      some soft-edged transparency, saved with Maximize Compatibility. Compare Photoshop's view
-      with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
-      matte that the crate should divide out (plan §6, PSD)?
-13. **Step 6's Windows half** (fire's `fire-decode` branch):
-    - **The regenerated HLSL compiles** (`fxc`, in fire's build) and the viewer draws an EXR and a
-      PQ file through both tone curves on Direct3D 11;
-    - **fire's TTFP** on the three iPhone HEICs and `grid_iphone.heic` against step 3's, within 2%;
-    - **fire-shellext** thumbnails `pq_lossless.avif` as SDR (203 cd/m² white, not the flat raw
-      signal);
-    - **an iPhone HEIC in HDR mode** (`H`) renders brighter highlights than its SDR base on
-      Direct3D 11, and `H` again returns to the base;
-    - **`seq_hevc.heif` plays three times and stops**, `seq_infinite.avif` loops, and navigating
-      away from `seq_over_cap.avif` mid-decode frees the pool at once.
+- **3D Review's texture-load gate fails on memory:** private bytes +183 MB (+11.4%) against a 5%
+  budget, on the 15-texture model. It is the mip chains step 7 keeps with each image, a third of
+  the decoded bytes; the Mac's +3.7% footprint hid it in unified memory. Accept it as the price of
+  the 87% shorter upload frame (and say so in 3D Review's D2 budget), or drop each chain once
+  every cache showing it has uploaded.
+- **Hands-on checks** (need eyes, Explorer or Photoshop):
+  - fire: Explorer thumbnails a HEIC, an AVIF, `pq_lossless.avif` (as SDR) and a cubemap DDS (every
+    face) through the new `fire_shellext.dll`; the viewer draws an EXR and a PQ file through both
+    tone curves; an iPhone HEIC in HDR mode (`H`) shows brighter highlights than its base, and `H`
+    again returns to it; `seq_hevc.heif` plays three times and stops, `seq_infinite.avif` loops,
+    and leaving `seq_over_cap.avif` mid-decode frees the pool at once.
+  - 3D Review: a HEIC and an AVIF plane (`local/win/*_plane.fbx`) in the viewer, and in
+    Explorer's thumbnail and preview pane through the new `review_shell.dll`.
+  - bite: install `dist/bite-0.5.3.exe` and import a HEIC folder through the HEIC chip.
+  - **A transparent PSD saved by Photoshop:** a layered document with no Background layer and
+    some soft-edged transparency, saved with Maximize Compatibility. Compare Photoshop's view
+    with fire-decode's merged image and ImageMagick's. Does the merged colour carry a white
+    matte that the crate should divide out (plan §6, PSD)?
+- **The first release** (item 6): tag `v0.1.0`. Its GitHub release carries the upstream source
+  tarballs of libheif 1.23.7, libde265 1.1.3 and dav1d 1.5.4, plus the triplets (FD14). They are
+  staged in `local/release/v0.1.0/`, from vcpkg's downloads (SHA-512s as its ports pin them),
+  with `SHA256SUMS.txt`.
+- **fire moves to the tag** (item 7), by merging its `fire-decode` branch, which already drops the
+  three in-tree crates and carries the installer test (FD2, FD9). Then:
+  - `fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "v0.1.0" }` in place of
+    `branch = "main"`;
+  - fire's CI follows: no `-p fire-decode` in the decoder-free job, no vendored-artifact checks or
+    LLVM install in the native one (the crate brings its libraries, and bindgen is gone), and a
+    toolchain of at least 1.99, the crate's `rust-version`. Its `stable` here is 1.98.1 too, so the
+    Windows builds used `+1.99.1`, and fire's installer script, which runs plain `cargo`, needs
+    the same;
+  - fire's notices point at this repository's tree at the tag, with libheif / libde265 as
+    LGPL-3.0-or-later, not `-only` (FD14).
+- **3D Review and bite move to the tag** the same way, merging their `fire-decode` branches.
 
-14. **Step 7's Windows half** (fire's and 3D Review's `fire-decode` branches):
-    - **fire's TTFP** over step 0's files against step 6's build, within 2%, the OpenEXRs
-      included: the builder's half-float path is new (`half`'s conversion, with F16C where the
-      CPU has it);
-    - **3D Review's gate** (`scripts/gate.ps1`) with a model naming many large textures, as on
-      the Mac: the upload frame shorter, frames while they load and the private / GPU bytes
-      within budget; and its startup gate against step 4's build;
-    - **the UV checker** in the viewer looks as before (the bake is unchanged on the Mac, so this
-      is a check of the build, not the filter).
+**Windows notes for whoever runs this again:**
+- `RUSTFLAGS="-C target-feature=+crt-static"` for anything built outside an app's tree: this
+  repository's tests, the benches, scratch tools. Without it heif-sys stops with its named error.
+- Git Bash has no `strings`: `grep -a -c` does the plugin-path check.
+- `pwsh -File` passes a comma list as one string: `local/ttfp-run.ps1` holds the file sets.
+- 3D Review's `check.ps1` stops at the first failing test binary; `--no-fail-fast` shows the rest.
 
 ## References
 
