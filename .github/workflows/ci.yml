@@ -3,8 +3,9 @@
 # FD13's four feature sets: viewer (psd heif icc raw mips), texture (psd heif mips), thumbnail
 # (psd heif) and core (none).
 #
-# macOS arm64 only for now. The Windows x64 job (with crt-static, FD20) is added with the Windows
-# HEIF libraries (crates/heif-sys/vendor/VENDOR.txt).
+# Two jobs, the two vendored targets (crates/heif-sys/vendor/VENDOR.txt): macOS arm64 and Windows
+# x64. Windows builds with the static CRT (FD20) through the job's own RUSTFLAGS, not a
+# .cargo/config.toml: the macOS job's last step needs a Windows check *without* crt-static.
 name: CI
 
 on:
@@ -64,3 +65,48 @@ jobs:
             echo "heif-sys built for Windows without crt-static"; exit 1
           fi
           grep -q "heif-sys needs the static CRT on Windows" check.log
+
+  windows:
+    runs-on: windows-latest
+    env:
+      # FD20: heif-sys's libraries are /MT, so everything links the static CRT. Only this job sees
+      # it (see the top of this file).
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy, core
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Clippy, thumbnail (psd heif)
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif
+
+      - name: Clippy, texture (psd heif mips)
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif,fire-decode/mips
+
+      - name: Clippy, viewer (psd heif icc raw mips)
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif,fire-decode/icc,fire-decode/raw,fire-decode/mips
+
+      - name: Test, core
+        run: cargo test -p fire-decode --locked
+
+      - name: Test, psd
+        run: cargo test -p fire-decode --locked --features psd
+
+      - name: Test, thumbnail (psd heif)
+        run: cargo test -p fire-decode --locked --features psd,heif
+
+      - name: Test, texture (psd heif mips)
+        run: cargo test -p fire-decode --locked --features psd,heif,mips
+
+      - name: Test, viewer (psd heif icc raw mips)
+        run: cargo test -p fire-decode --locked --features psd,heif,icc,raw,mips
+
+      - name: Test, psd-sdk-sys
+        run: cargo test -p psd-sdk-sys --locked

@@ -1,5 +1,5 @@
 # fire-decode's Windows HEIF stack (FD16, FD20): static libraries against the static CRT (/MT),
-# release only, no plugin loading. Not yet run: the Windows re-vendor is still to do.
+# release only, no plugin loading. Built x64-windows/ on 11 November 2026 (VENDOR.txt).
 set(VCPKG_TARGET_ARCHITECTURE x64)
 set(VCPKG_CRT_LINKAGE static)
 set(VCPKG_LIBRARY_LINKAGE static)

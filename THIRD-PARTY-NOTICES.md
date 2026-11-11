@@ -43,22 +43,20 @@ in [`crates/heif-sys/vendor/VENDOR.txt`](crates/heif-sys/vendor/VENDOR.txt).
 
 ### libheif - LGPL-3.0-or-later
 
-*HEIF / HEIC / AVIF container and API. Version 1.23.7 (macOS).*
+*HEIF / HEIC / AVIF container and API. Version 1.23.7 (macOS and Windows).*
 Copyright © Dirk Farin and contributors - <https://github.com/strukturag/libheif>
 
 ### libde265 - LGPL-3.0-or-later
 
-*HEVC decoder, for `.heic` / `.heif`. Version 1.1.3 (macOS).*
+*HEVC decoder, for `.heic` / `.heif`. Version 1.1.3 (macOS and Windows).*
 Copyright © struktur AG and contributors - <https://github.com/strukturag/libde265>
 
 ### dav1d - BSD-2-Clause
 
-*AV1 decoder, for `.avif`. Version 1.5.4 (macOS).*
+*AV1 decoder, for `.avif`. Version 1.5.4 (macOS and Windows).*
 Copyright © 2018-2024 VideoLAN and dav1d authors. All rights reserved. -
 <https://code.videolan.org/videolan/dav1d>
 License text: [`licenses/BSD-2-Clause.txt`](licenses/BSD-2-Clause.txt)
-
-The Windows libraries are still to be re-vendored from the same vcpkg baseline (`VENDOR.txt`).
 
 > ### Your rights under the LGPL
 >
