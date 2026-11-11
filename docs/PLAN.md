@@ -3,8 +3,9 @@
 **Status, 11 November 2026:** the crate lives here, the repository is public, and every step is done
 on a Mac. The Windows stretch ran on 11 November: every gate passed but one, 3D Review's texture-load
 memory budget, which the user accepted. fire, 3D Review and bite each build on it on a `fire-decode`
-branch, which merges when they move to the first tag, `v0.1.0` (released 11 November). Those moves,
-and a few hands-on checks, are what remain.
+branch, at the first tag, `v0.1.0` (released 11 November). `v0.1.1` pins every decoder's version
+here, so the apps link what CI tests; the branches move to it, then merge. Those moves, and a few
+hands-on checks, are what remain.
 
 ## What's here
 
@@ -13,6 +14,7 @@ and a few hands-on checks, are what remain.
 | [`fire-decode-plan.md`](../fire-decode-plan.md) | The migration design: fire-decode becomes the decoder shared by fire, 3D Review and bite, with HEIF / HEIC / AVIF included. Decisions FD1-FD20; rollout steps 0-7 with gates in §5. fire's `docs/fire-decode-plan.md` is a copy, so keep the two in step |
 | [`asset-check-plan.md`](../asset-check-plan.md) | A pointer only. The Asset Check design moved on 5 November 2026 to the rules repo, SandboxVR/exp-content-rules (`docs/asset-check-plan.md`); its history up to then is here |
 | [`product.json`](../product.json) | The crate's name, version, description and home: the only place they are set, as in fire and 3D Review. `build.rs` reads the version into `fire_decode::VERSION`, and the release tag is `v` + it. The Cargo manifests carry no version |
+| [`scripts/update-decoders.sh`](../scripts/update-decoders.sh) | Moves the decoder pins. Every decoder's version is set exactly (`=`) in the workspace `Cargo.toml` and nowhere else, so each app links what CI tests; `cargo update` can't move such a pin, so the script loosens the pins, runs it, and pins again |
 | [`scripts/release.sh`](../scripts/release.sh) | Tags and publishes a release from `product.json`'s version: checks (main, pushed, CI green, both targets' libraries, a source tarball per vendored library), then the tag and a GitHub release with the tarballs, the triplets and their checksums (FD14). CI fails a tag that isn't `v` + that version |
 
 ## Priority
@@ -319,9 +321,13 @@ of the decoded bytes (the Mac's +3.7% footprint hid it in unified memory). Accep
     notices already named the tag.
   - Builds that run plain `cargo` (fire's installer script, 3D Review's packaging and
     `check.ps1`) need a `stable` of at least 1.99: `rustup update stable` (1.98.1 here).
-  - Each app's own decoder crates stay at its lockfile's versions (fire's `exr` 1.74.0, `lcms2`
-    6.1.1; this repository's 1.74.3 and 6.2.0): within semver, and what the Windows gates
-    measured. `cargo update -p <crate>` in an app moves one when wanted.
+  - **The decoders' versions are this repository's** (`v0.1.1`). At `v0.1.0` each app's lockfile
+    still chose them, cargo reading only the app's own: fire had `exr` 1.74.0 and `lcms2` 6.1.1
+    with Little-CMS 2.17, this repository 1.74.3 and 6.2.0 with 2.19. Now the workspace
+    `Cargo.toml` pins every decoder exactly, the crates reached through another included (`png`,
+    `gif`, the `jxl-*` crates, `lcms2-sys`), and `scripts/update-decoders.sh` moves the pins.
+    General-purpose crates (`bytemuck`, `flate2`, `rayon`) keep ranges. The branches move to
+    `v0.1.1` once it's released.
 - **The local `[patch]`** that built the apps against this checkout is off
   (`D:\Dev\.cargo\config.toml.off`; the Mac's `~/Dev/.cargo/config.toml` likewise needs moving
   aside before an app's `Cargo.lock` is updated there). Rename it back to work on the crate inside

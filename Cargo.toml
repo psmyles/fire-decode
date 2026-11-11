@@ -22,13 +22,24 @@ undocumented_unsafe_blocks = "deny"
 unused_must_use = "deny"
 missing_debug_implementations = "warn"
 
-# The versions fire used when the crate left it (fire 710b3f6), so fire's switch to the tag
-# changes no decoder.
+# The decoders' versions are set here, exactly (`=`), and nowhere else. Cargo resolves an app's
+# dependencies from the app's own Cargo.lock and never reads this repository's, so a range here
+# would let each app link versions of its own. An exact requirement makes every app link the
+# versions this repository's CI tests; an app moves only by moving to a new tag.
+#
+# Pinned: every crate that reads a format, decompresses a format's data or converts colour,
+# including those reached only through another crate ("Pinned only", below). Not pinned: the
+# general-purpose crates the apps share (bytemuck, flate2, half, rayon, ...), which follow each
+# app's lockfile, and the two encoders zune-image carries but this crate never runs (zune-jpegxl,
+# jpeg-encoder).
+#
+# `cargo update` can't move an exact pin: scripts/update-decoders.sh does (README, "Decoder
+# versions").
 [workspace.dependencies]
 # zune is the hot-path decoder for the common formats. Its default feature is `all`, wider than
 # `sniff()` routes: PSD goes to psd_sdk, and PNG / HDR to `image` (measured faster). So only the
 # formats routed here, plus the two speed features.
-zune-image = { version = "0.5", default-features = false, features = [
+zune-image = { version = "=0.5.0", default-features = false, features = [
     "jpeg",
     "bmp",
     "qoi",
@@ -39,18 +50,19 @@ zune-image = { version = "0.5", default-features = false, features = [
     "simd",
     "threads",
 ] }
-zune-core = "0.5"
-zune-jpeg = "0.5"
-zune-bmp = "0.5"
-zune-ppm = "0.5"
-zune-farbfeld = "0.5"
-jxl-oxide = "0.12"
-qoi = "0.4"
-libwebp-sys = "0.14"
-image-webp = "0.2"
+zune-core = "=0.5.3"
+zune-jpeg = "=0.5.15"
+zune-bmp = "=0.5.2"
+zune-ppm = "=0.5.1"
+zune-farbfeld = "=0.5.2"
+jxl-oxide = "=0.12.6"
+qoi = "=0.4.1"
+# Compiles libwebp 1.6.0 (C), for lossy WebP.
+libwebp-sys = "=0.14.4"
+image-webp = "=0.2.4"
 # The fallback decoder (TIFF / TGA / ICO), multi-frame GIF, and the PNG and Radiance HDR paths.
 # Not the default features: they pull in an AV1 encoder (`avif` -> `rav1e`) nothing can reach.
-image = { version = "0.25", default-features = false, features = [
+image = { version = "=0.25.10", default-features = false, features = [
     "png",
     "gif",
     "hdr",
@@ -60,13 +72,45 @@ image = { version = "0.25", default-features = false, features = [
     "bmp",
     "jpeg",
 ] }
-tiff = "0.11"
-exr = "1"
-lcms2 = { version = "6", features = ["static"] }
+tiff = "=0.11.3"
+exr = "=1.74.3"
+lcms2 = { version = "=6.2.0", features = ["static"] }
 # DDS: the header parser and a BC1-BC7 (BC6H included) block decompressor, both pure Rust.
-ddsfile = "0.6"
-bcdec_rs = "0.2"
-miniz_oxide = "0.8"
+ddsfile = "=0.6.0"
+bcdec_rs = "=0.2.1"
+# PSD's zip-compressed layer data.
+miniz_oxide = "=0.8.9"
+
+# Pinned only: crates/fire-decode names these just to fix their versions, and never calls them.
+# They ask for no features of their own, so each keeps the ones the crate above it enables.
+# image's PNG and GIF decoders (with their inflate and LZW), and its colour management.
+png = { version = "=0.18.1", default-features = false }
+fdeflate = { version = "=0.3.7", default-features = false }
+gif = { version = "=0.14.2", default-features = false }
+weezl = { version = "=0.1.12", default-features = false }
+moxcms = { version = "=0.8.1", default-features = false }
+pxfm = { version = "=0.1.30", default-features = false }
+# TIFF's CCITT fax decoder, EXR's inflate, zune-image's QOI decoder.
+fax = { version = "=0.2.7", default-features = false }
+zune-inflate = { version = "=0.2.54", default-features = false }
+zune-qoi = { version = "=0.5.2", default-features = false }
+# jxl-oxide's own crates.
+jxl-bitstream = { version = "=1.1.0", default-features = false }
+jxl-coding = { version = "=1.0.1", default-features = false }
+jxl-color = { version = "=0.11.0", default-features = false }
+jxl-frame = { version = "=0.13.3", default-features = false }
+jxl-grid = { version = "=0.6.2", default-features = false }
+jxl-image = { version = "=0.13.0", default-features = false }
+jxl-jbr = { version = "=0.2.1", default-features = false }
+jxl-modular = { version = "=0.11.3", default-features = false }
+jxl-oxide-common = { version = "=1.0.0", default-features = false }
+jxl-render = { version = "=0.12.4", default-features = false }
+jxl-threadpool = { version = "=1.0.0", default-features = false }
+jxl-vardct = { version = "=0.11.1", default-features = false }
+# Little-CMS 2.19 itself (C), which lcms2 links. With `icc` only.
+lcms2-sys = { version = "=4.0.7", default-features = false }
+
+# Not decoders: these follow each app's lockfile.
 bytemuck = { version = "1", features = ["derive"] }
 # Tests only: reading fixtures/heif/expected.json.
 serde_json = "1"

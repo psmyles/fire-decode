@@ -5,6 +5,9 @@ fire-decode's own code is `MIT OR Apache-2.0` ([`LICENSE-MIT`](LICENSE-MIT),
 (fire-decode plan, FD14). They are compiled or linked statically into every binary that enables
 their feature, so they travel with that binary.
 
+The versions below are exact: the workspace `Cargo.toml` pins every decoder, so an app at a given
+tag links these and no others.
+
 This file covers the native libraries only. The Rust crates fire-decode depends on are listed by
 each app's own notices, generated from that app's `Cargo.lock`, because what lands in a binary
 depends on the app's features and targets.

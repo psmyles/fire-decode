@@ -16,7 +16,7 @@ psd = ["dep:psd-sdk-sys"]
 heif = ["dep:heif-sys"]
 # ICC and nclx colour conversion through lcms2. Without it `DecodeOptions::honor_icc` does not
 # exist; the profile bytes still come back in `DecodedImage::icc`.
-icc = ["dep:lcms2"]
+icc = ["dep:lcms2", "dep:lcms2-sys"]
 # Camera raw, from its embedded JPEG preview.
 raw = []
 # The mip-chain builder fire and 3D Review upload textures with (FD11, `fire_decode::mips`).
@@ -45,6 +45,29 @@ psd-sdk-sys = { workspace = true, optional = true }
 heif-sys = { workspace = true, optional = true }
 bytemuck.workspace = true
 miniz_oxide.workspace = true
+# Pinned only (the workspace Cargo.toml says why): named to fix their versions, never called.
+png.workspace = true
+fdeflate.workspace = true
+gif.workspace = true
+weezl.workspace = true
+moxcms.workspace = true
+pxfm.workspace = true
+fax.workspace = true
+zune-inflate.workspace = true
+zune-qoi.workspace = true
+jxl-bitstream.workspace = true
+jxl-coding.workspace = true
+jxl-color.workspace = true
+jxl-frame.workspace = true
+jxl-grid.workspace = true
+jxl-image.workspace = true
+jxl-jbr.workspace = true
+jxl-modular.workspace = true
+jxl-oxide-common.workspace = true
+jxl-render.workspace = true
+jxl-threadpool.workspace = true
+jxl-vardct.workspace = true
+lcms2-sys = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -162,6 +162,35 @@ one folder per target, built with vcpkg from a pinned baseline. Re-vendoring is 
 routine: [`crates/heif-sys/vendor/VENDOR.txt`](crates/heif-sys/vendor/VENDOR.txt) has the recipe,
 the versions and the checks to run afterwards.
 
+## Decoder versions
+
+This repository sets the version of every decoder the apps link, and nothing else does. Cargo
+builds an app from the app's own `Cargo.lock` and ignores this one, so a version range here would
+let each app link versions of its own. The workspace [`Cargo.toml`](Cargo.toml) pins each decoder
+exactly instead (`exr = "=1.74.3"`). An app at a tag links exactly what CI tested at that tag, and
+an app that names one of these crates itself is held to the same version.
+
+Pinned: every crate that reads a format, decompresses a format's data or converts colour. That
+includes crates reached only through another one, which the crate names just to fix their
+versions: `image`'s `png` and `gif`, the `jxl-*` crates under `jxl-oxide`, and `lcms2-sys`, which
+is Little-CMS itself. General-purpose crates the apps share, such as `bytemuck`, `flate2` and
+`rayon`, keep ranges and follow each app's lockfile.
+
+**To update the decoders**, run the update script from the repository's root, then commit:
+
+```sh
+scripts/update-decoders.sh              # every pin; or name some: scripts/update-decoders.sh exr png
+```
+```powershell
+& "$env:ProgramFiles\Git\bin\bash.exe" scripts/update-decoders.sh   # PowerShell
+```
+
+`cargo update` can't move an exact pin. The script loosens the pins, runs `cargo update` on them,
+pins them again at the new versions, and lists what moved and any crate an update newly brought
+in. A new major version, or a new minor before 1.0, changes the API: edit that pin by hand. Then
+run the tests and the performance check, update [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)
+if `libwebp-sys` or `lcms2-sys` moved, and release.
+
 ## Versions and releases
 
 [`product.json`](product.json) is the only place the crate's version, name and description are
@@ -200,7 +229,7 @@ and pushes the tag, and publishes the GitHub release. The release carries the ta
 triplets and `SHA256SUMS.txt`. It needs `git` and the GitHub CLI (`gh`), signed in.
 
 The apps then move to a release by changing the `tag` in their `Cargo.toml` and running
-`cargo update -p fire-decode`.
+`cargo update -p fire-decode`, which brings the release's decoder versions with it.
 
 ## Licence
 
