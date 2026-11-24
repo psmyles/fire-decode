@@ -1,7 +1,8 @@
 # Decoder versions
 
 Every library that decodes pixels in fire-decode, the version in use, and upstream's latest when
-last checked. Checked 10 November 2026, before the first tag.
+last checked. Checked 10 November 2026, before the first tag; the KTX crates and `lcms2` were
+checked again on 24 November 2026.
 
 ## Rust crates
 
@@ -25,7 +26,7 @@ From `Cargo.lock`; "latest" is crates.io's newest stable release.
 | `texture2ddecoder` | ETC1 / ETC2 / EAC, ASTC LDR, PVRTC1 blocks (feature `ktx`) | 0.1.2 | same | Added 24 November 2026. Needs its default `alloc`: 0.1.2 doesn't build without it |
 | `basisu` | Basis Universal: ETC1S, UASTC, UASTC HDR (feature `ktx`) | 0.1.0 | same | Added 24 November 2026: its only release (July 2026), held to KTX-Software's files by `tests/ktx_fixtures.rs` |
 | `ruzstd` | Zstandard-supercompressed KTX2 levels (feature `ktx`) | 0.7.3 | 0.9.1 | Stays on 0.7: `basisu` asks for ^0.7, and one copy links |
-| `lcms2`, `lcms2-sys` | ICC conversion (Little-CMS, below) | 6.2.0, 4.0.7 | 6.3.0 | 6.2.0 was yanked; see PLAN.md, item 14 |
+| `lcms2`, `lcms2-sys` | ICC conversion (Little-CMS, below) | 6.3.0, 4.2.0 | same | Updated 24 November 2026 from 6.2.0, 4.0.7: 6.2.0 was yanked, and 6.3.0 needs `lcms2-sys` 4.2 |
 | `miniz_oxide` | zlib for PSD layer channels | 0.8.9 | 0.9.1 | Stays: `exr` and `png` use 0.8 too |
 | `flate2` | deflate in TIFF and PNG (through `tiff`, `png`) | 1.1.11 | same | Updated from 1.1.9 |
 
@@ -37,12 +38,12 @@ From `Cargo.lock`; "latest" is crates.io's newest stable release.
 | libde265 | HEVC | 1.1.3 | 1.1.3 (14 September 2026) | as libheif |
 | dav1d | AV1 | 1.5.4 | 1.5.4 (14 July 2026) | as libheif |
 | libwebp | lossy WebP | 1.6.0 | 1.6.0 | bundled by `libwebp-sys` |
-| Little-CMS | ICC | 2.19 | 2.20 (31 October 2026) | bundled by `lcms2-sys`, whose newest (4.0.7) is still 2.19 |
+| Little-CMS | ICC | 2.20 | 2.20 (31 October 2026) | bundled by `lcms2-sys` 4.2.0 |
 | psd_sdk | PSD merged image | `f514495` + patches | `bfa1173` (11 August 2026) | Stays; see below |
 
-**Why two aren't the latest:**
-- **Little-CMS 2.20** reaches fire-decode only through a `lcms2-sys` release. Take it when one
-  ships, rather than vendoring Little-CMS here.
+Little-CMS reaches fire-decode only through a `lcms2-sys` release; it isn't vendored here.
+
+**Why one isn't the latest:**
 - **psd_sdk's three later commits** add PSB and smart objects to its document and layer parsers.
   They don't touch the two files the merged-image decode goes through (`PsdParseImageDataSection.cpp`,
   `PsdDecompressRle.cpp`), so they would bring a rewritten layer parser fire-decode never calls, and

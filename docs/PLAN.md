@@ -263,10 +263,11 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
       - CI on the Mac (on push);
       - the `v0.2.0` tag (`scripts/release.sh`);
       - turning `ktx` on in an app, with a look at real files in fire when that happens.
-    - **Found on the way, not done:** `lcms2` 6.2.0, pinned here, was yanked from crates.io (6.3.0
-      followed on 18 November). Lockfiles that have it keep working; a fresh resolve (a bench
-      without its lockfile, an older checkout) fails. Moving the pin is a decoder update
-      (`scripts/update-decoders.sh lcms2`) with its own TTFP check.
+    - **lcms2, also for `v0.2.0`:** `lcms2` 6.2.0, which was pinned here, had been yanked from
+      crates.io, so a fresh resolve failed. It moved to 6.3.0, and `lcms2-sys` to 4.2.0, which 6.3.0
+      needs; that brings Little-CMS 2.19 → 2.20. ICC output is byte-identical and timing is
+      unchanged on Windows (`baselines.md`, "Decoder update: lcms2 6.3.0"). fire's TTFP on the Mac
+      wasn't re-run.
 
 The gates are in `fire-decode-plan.md` §5. Each now has both halves recorded in
 [`baselines.md`](baselines.md).

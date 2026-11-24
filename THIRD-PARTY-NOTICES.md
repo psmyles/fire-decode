@@ -25,7 +25,7 @@ patent licence for WebP; its terms are in the `PATENTS` file of the libwebp sour
 
 ### Little-CMS (lcms2) - MIT
 
-*ICC and nclx colour conversion. Version 2.19, compiled from source by the `lcms2-sys` crate.*
+*ICC and nclx colour conversion. Version 2.20, compiled from source by the `lcms2-sys` crate.*
 Copyright © 2023 Marti Maria Saguer - <https://littlecms.com>
 License text: [`licenses/Little-CMS-MIT.txt`](licenses/Little-CMS-MIT.txt)
 

@@ -992,3 +992,24 @@ model (`shaded`), and of `SM_Wall_Break_4x3m.fbx` and `monkey.fbx` under the UV 
 (`checker`), are byte-identical between `544c20b` and `b653de2` (`local/win/snap/`), so the
 Windows build of the UV-checker bake draws as before. 3D Review's `tests/bake_mips.rs`, which
 holds the bake's filter to the crate's, passes (7 tests, in the `--no-fail-fast` run).
+
+### Decoder update: lcms2 6.3.0
+
+24 November 2026: `lcms2` 6.2.0 → 6.3.0 and `lcms2-sys` 4.0.7 → 4.2.0 (Little-CMS 2.19 → 2.20).
+6.2.0 had been yanked. Two builds of `bench/decode-formats` from the same tree, one on each pair
+of pins, were run alternately, three rounds each with `--reps 15`, on the three iPhone AVIFs in
+`local/corpus/` and every file in `fixtures/heif/`. The iPhone files carry Display P3 profiles,
+which Little-CMS converts to sRGB. Best median of the three rounds:
+
+| File | 6.2.0 (ms) | 6.3.0 (ms) | Change |
+| --- | --- | --- | --- |
+| `IMG_2131.avif` 4032×3024 | 98.19 | 97.37 | -0.8% |
+| `IMG_2135.avif` 5712×4284 | 191.89 | 193.02 | +0.6% |
+| `IMG_2139.avif` 3024×4032 | 93.84 | 93.97 | +0.1% |
+| the 31 `fixtures/heif` files, summed | 1148.41 | 1136.09 | -1.1% |
+
+The small fixtures scatter between -6% and +7% in both directions, on decodes of 1 to 5 ms:
+noise. Output is the same, too: a scratch tool hashed every decode (pixels, mips, layout,
+labels) of those files and of the three iPhone HEICs in bite's corpus, under four setups,
+and the 250 hashes match between the two builds. All tests pass with every feature on.
+fire's TTFP on the Mac wasn't re-run for this update.

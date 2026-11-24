@@ -74,7 +74,7 @@ image = { version = "=0.25.10", default-features = false, features = [
 ] }
 tiff = "=0.11.3"
 exr = "=1.74.3"
-lcms2 = { version = "=6.2.0", features = ["static"] }
+lcms2 = { version = "=6.3.0", features = ["static"] }
 # DDS: the header parser and a BC1-BC7 (BC6H included) block decompressor, both pure Rust.
 ddsfile = "=0.6.0"
 bcdec_rs = "=0.2.1"
@@ -116,8 +116,8 @@ jxl-oxide-common = { version = "=1.0.0", default-features = false }
 jxl-render = { version = "=0.12.4", default-features = false }
 jxl-threadpool = { version = "=1.0.0", default-features = false }
 jxl-vardct = { version = "=0.11.1", default-features = false }
-# Little-CMS 2.19 itself (C), which lcms2 links. With `icc` only.
-lcms2-sys = { version = "=4.0.7", default-features = false }
+# Little-CMS 2.20 itself (C), which lcms2 links. With `icc` only.
+lcms2-sys = { version = "=4.2.0", default-features = false }
 
 # Not decoders: these follow each app's lockfile.
 bytemuck = { version = "1", features = ["derive"] }
