@@ -223,10 +223,16 @@ The Cargo manifests carry no version of their own, so cargo reports 0.0.0; ignor
    ```sh
    scripts/release.sh <assets folder>              # macOS, or Git Bash on Windows
    ```
-   ```powershell
-   & "$env:ProgramFiles\Git\bin\bash.exe" scripts/release.sh <assets folder>   # PowerShell
-   ```
    Add `--dry-run` to see the checks, the files and the notes without tagging anything.
+
+   From PowerShell, `scripts/release.ps1` runs `release.sh` in Git for Windows' bash. Without
+   `-Assets` it does step 3 itself, taking the tarballs from the latest release. It always shows
+   the dry run first, then asks before tagging:
+   ```powershell
+   scripts\release.ps1 -DryRun                        # the checks and the notes only
+   scripts\release.ps1                                # dry run, then asks; -Yes doesn't ask
+   scripts\release.ps1 -Assets <assets folder>        # after a re-vendor
+   ```
 
 The script checks that you are on `main`, that the tree is clean and pushed, and that CI passed
 on that commit. It also checks the tag is new, both targets' libraries are present, and there is

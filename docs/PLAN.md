@@ -16,6 +16,7 @@ what remain.
 | [`product.json`](../product.json) | The crate's name, version, description and home: the only place they are set, as in fire and 3D Review. `build.rs` reads the version into `fire_decode::VERSION`, and the release tag is `v` + it. The Cargo manifests carry no version |
 | [`scripts/update-decoders.sh`](../scripts/update-decoders.sh) | Moves the decoder pins. Every decoder's version is set exactly (`=`) in the workspace `Cargo.toml` and nowhere else, so each app links what CI tests; `cargo update` can't move such a pin, so the script loosens the pins, runs it, and pins again |
 | [`scripts/release.sh`](../scripts/release.sh) | Tags and publishes a release from `product.json`'s version: checks (main, pushed, CI green, both targets' libraries, a source tarball per vendored library), then the tag and a GitHub release with the tarballs, the triplets and their checksums (FD14). CI fails a tag that isn't `v` + that version |
+| [`scripts/release.ps1`](../scripts/release.ps1) | `release.sh` from PowerShell: finds Git for Windows' bash, takes the source tarballs from the latest release unless `-Assets` names a folder, shows the dry run, and asks before tagging |
 
 ## Priority
 
@@ -233,7 +234,7 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
     remains is the apps' merges onto `v0.1.1`. One open decision: a fairer lease in the crate (FD8,
     item 8).
 
-14. **KTX and KTX2 - done on Windows, for `v0.2.0`** (24 November 2026), behind a new `ktx`
+14. **KTX and KTX2 - done on Windows, released in `v0.2.0`** (24 November 2026), behind a new `ktx`
     feature, off by default. Crate only: no app turns it on yet, and 3D Review's "no KTX2"
     non-goal stands until it does.
     - **What it reads** (`src/ktx/`, `src/texture.rs`):
@@ -259,10 +260,9 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
         - UASTC within 0.28 of its PNG, ETC1S within 2.9;
         - KTX and KTX2 twins bit-identical;
       - DDS no slower (`bench/decode-formats`).
-    - **Left:**
-      - CI on the Mac (on push);
-      - the `v0.2.0` tag (`scripts/release.sh`);
-      - turning `ktx` on in an app, with a look at real files in fire when that happens.
+    - **Released** as `v0.2.0` (24 November 2026, at `30c414a`), after CI passed on Windows and the
+      Mac.
+    - **Left:** turning `ktx` on in an app, with a look at real files in fire when that happens.
     - **lcms2, also for `v0.2.0`:** `lcms2` 6.2.0, which was pinned here, had been yanked from
       crates.io, so a fresh resolve failed. It moved to 6.3.0, and `lcms2-sys` to 4.2.0, which 6.3.0
       needs; that brings Little-CMS 2.19 → 2.20. ICC output is byte-identical and timing is
