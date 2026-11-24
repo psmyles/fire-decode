@@ -809,8 +809,22 @@ fn straighten(pixels: &mut [u8], format: PixelFormat) {
                 }
             }
         }
-        // The only half-float source is BC6H, which has no alpha channel to have multiplied by.
-        PixelFormat::Rgba16Float => {}
+        // An RGBA16F surface with premultiplied alpha. (BC6H has no alpha to have multiplied by:
+        // its lane is a constant 1.0, which this leaves alone.)
+        PixelFormat::Rgba16Float => {
+            use exr::prelude::f16;
+            let half = |b: &[u8]| f16::from_bits(u16::from_ne_bytes([b[0], b[1]])).to_f32();
+            for px in pixels.as_chunks_mut::<8>().0 {
+                let a = half(&px[6..8]);
+                if a <= 0.0 || a == 1.0 {
+                    continue;
+                }
+                for c in 0..3 {
+                    let s = f16::from_f32(half(&px[c * 2..c * 2 + 2]) / a).to_bits();
+                    px[c * 2..c * 2 + 2].copy_from_slice(&s.to_ne_bytes());
+                }
+            }
+        }
     }
 }
 

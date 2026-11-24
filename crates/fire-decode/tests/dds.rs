@@ -562,6 +562,34 @@ fn dxt2_premultiplied_alpha_is_straightened_and_dxt3_is_not() {
     assert_eq!(rgba8(&premul, 0), [248, 0, 0, 136]);
 }
 
+/// A half-float surface whose header says premultiplied is straightened like an 8-bit one: the
+/// HDR path is where a too-dark edge would be hardest to tell from the content.
+#[test]
+fn premultiplied_rgba16f_is_straightened() {
+    // (0.25, 0.125, 1.0) at alpha 0.5, then a fully transparent texel that must stay as stored.
+    let halves: [u16; 8] = [0x3400, 0x3000, 0x3c00, 0x3800, 0x3400, 0x3400, 0x3400, 0];
+    let mut dds = Dds::new_dxgi(NewDxgiParams {
+        height: 1,
+        width: 2,
+        depth: None,
+        format: DxgiFormat::R16G16B16A16_Float,
+        mipmap_levels: None,
+        array_layers: None,
+        is_cubemap: false,
+        resource_dimension: D3D10ResourceDimension::Texture2D,
+        alpha_mode: AlphaMode::PreMultiplied,
+        caps2: Default::default(),
+    })
+    .expect("DX10 header");
+    for (i, h) in halves.iter().enumerate() {
+        dds.data[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
+    }
+    let img = decode(&bytes(&dds), None, &opts()).expect("RGBA16F decodes");
+    // 0.25 / 0.5 = 0.5, 0.125 / 0.5 = 0.25, 1.0 / 0.5 = 2.0; alpha untouched.
+    assert_eq!(lanes16(&img, 0), [0x3800, 0x3400, 0x4000, 0x3800]);
+    assert_eq!(lanes16(&img, 1), [0x3400, 0x3400, 0x3400, 0]);
+}
+
 // --- routing and guards ------------------------------------------------------------------------
 
 /// Routing is by magic bytes, so a mislabelled file still opens — and a `.dds` extension is
