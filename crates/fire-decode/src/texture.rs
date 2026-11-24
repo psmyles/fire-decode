@@ -432,7 +432,15 @@ pub(crate) fn decode_surface(fmt: &Format, src: &[u8], w: u32, h: u32) -> Vec<u8
 /// hand-off costs more than the work — the same threshold the mip builder uses.
 const PARALLEL_MIN_TEXELS: usize = 256 * 256;
 
+/// The most threads one surface's blocks are expanded on, as before the budget took them over.
+const MAX_BLOCK_THREADS: usize = 8;
+
 /// Expand block-compressed `src` into `out`, one 4x4 block at a time.
+///
+/// The threads come from the budget (FD8), like every other pass: a band of block rows at a time,
+/// on helpers that count as decoding. Spawned by hand, as they once were, they took cores the
+/// budget had already lent elsewhere, and a panic on one of them ran the panic hook on a thread
+/// [`in_decode`](crate::in_decode) knew nothing of — which 3D Review's hook answers by aborting.
 fn decode_blocks(b: Block, src: &[u8], w: u32, h: u32, out: &mut [u8], row: usize, bpp: usize) {
     let bw = (w as usize).div_ceil(4);
     let bsz = b.block_bytes();
@@ -451,32 +459,21 @@ fn decode_blocks(b: Block, src: &[u8], w: u32, h: u32, out: &mut [u8], row: usiz
         }
     };
 
+    let band = 4 * row;
+    if band == 0 {
+        return;
+    }
     let block_rows = (h as usize).div_ceil(4);
-    let threads = if w * h as usize >= PARALLEL_MIN_TEXELS {
-        std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .clamp(1, 8)
-            .min(block_rows.max(1))
+    let want = if w * h as usize >= PARALLEL_MIN_TEXELS {
+        block_rows.min(MAX_BLOCK_THREADS)
     } else {
         1
     };
-    if threads <= 1 {
-        for (by, dst) in out.chunks_mut(4 * row).enumerate() {
-            block_row(by, dst);
+    crate::budget::run_chunks_mut(out, band, want, |offset, part| {
+        for (j, dst) in part.chunks_mut(band).enumerate() {
+            block_row(offset / band + j, dst);
         }
-    } else {
-        let rows_per = block_rows.div_ceil(threads);
-        std::thread::scope(|scope| {
-            for (i, chunk) in out.chunks_mut(rows_per * 4 * row).enumerate() {
-                let block_row = &block_row;
-                scope.spawn(move || {
-                    for (j, dst) in chunk.chunks_mut(4 * row).enumerate() {
-                        block_row(i * rows_per + j, dst);
-                    }
-                });
-            }
-        });
-    }
+    });
 }
 
 /// Decode one 4x4 block and scatter its in-bounds texels into `dst`, a band of up to four output
@@ -858,5 +855,43 @@ mod tests {
         let mut out = vec![0u8; texels * 4];
         decode_plain(p, short, PixelFormat::Rgba8Unorm, &mut out);
         assert!(out == expected, "short source");
+    }
+
+    /// The block expander, split across the budget's threads in bands of block rows, against the
+    /// same blocks expanded one at a time in order. The surface is past the threading threshold
+    /// and neither axis is a multiple of 4, so the bands and the edge blocks both get cut.
+    #[test]
+    fn threaded_blocks_match_one_block_at_a_time() {
+        let (w, h) = (603u32, 701u32);
+        let (bw, bh) = ((w as usize).div_ceil(4), (h as usize).div_ceil(4));
+        for b in [Block::Bc1, Block::Bc7, Block::Bc4(true), Block::Bc6h(false)] {
+            let fmt = Format::block(
+                b,
+                if matches!(b, Block::Bc6h(_)) {
+                    PixelFormat::Rgba16Float
+                } else {
+                    PixelFormat::Rgba8Unorm
+                },
+                8,
+                4,
+                "test",
+            );
+            let src: Vec<u8> = (0..fmt.level_bytes(w, h, 1).unwrap())
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+                .collect();
+            let bpp = fmt.out.bytes_per_pixel();
+            let row = w as usize * bpp;
+            let mut expected = vec![0u8; row * h as usize];
+            for by in 0..bh {
+                let rows = (h as usize - by * 4).min(4);
+                let band = &mut expected[by * 4 * row..(by * 4 + rows) * row];
+                for bx in 0..bw {
+                    let blk = &src[(by * bw + bx) * b.block_bytes()..][..b.block_bytes()];
+                    let cols = (w as usize - bx * 4).min(4);
+                    emit_block(b, blk, band, row, bx * 4 * bpp, cols, rows);
+                }
+            }
+            assert!(decode_surface(&fmt, &src, w, h) == expected, "{b:?}");
+        }
     }
 }
