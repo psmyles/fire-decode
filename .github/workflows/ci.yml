@@ -1,7 +1,7 @@
 # Correctness only (FD13). Performance is gated locally, before each tag (docs/baselines.md).
 #
 # FD13's four feature sets: viewer (psd heif icc raw mips), texture (psd heif mips), thumbnail
-# (psd heif) and core (none).
+# (psd heif) and core (none). Plus `ktx` on its own, which no app's set has yet.
 #
 # Two jobs, the two vendored targets (crates/heif-sys/vendor/VENDOR.txt): macOS arm64 and Windows
 # x64. Windows builds with the static CRT (FD20) through the job's own RUSTFLAGS, not a
@@ -52,6 +52,9 @@ jobs:
       - name: Clippy, viewer (psd heif icc raw mips)
         run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif,fire-decode/icc,fire-decode/raw,fire-decode/mips
 
+      - name: Clippy, ktx
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/ktx
+
       - name: Test, core
         run: cargo test -p fire-decode --locked
 
@@ -66,6 +69,9 @@ jobs:
 
       - name: Test, viewer (psd heif icc raw mips)
         run: cargo test -p fire-decode --locked --features psd,heif,icc,raw,mips
+
+      - name: Test, ktx
+        run: cargo test -p fire-decode --locked --features ktx
 
       # The merged PSD bridge's own suites (FD3). real_psd skips here: its PSD is in 3D Review.
       - name: Test, psd-sdk-sys
@@ -108,6 +114,9 @@ jobs:
       - name: Clippy, viewer (psd heif icc raw mips)
         run: cargo clippy --workspace --all-targets --locked --features fire-decode/psd,fire-decode/heif,fire-decode/icc,fire-decode/raw,fire-decode/mips
 
+      - name: Clippy, ktx
+        run: cargo clippy --workspace --all-targets --locked --features fire-decode/ktx
+
       - name: Test, core
         run: cargo test -p fire-decode --locked
 
@@ -122,6 +131,9 @@ jobs:
 
       - name: Test, viewer (psd heif icc raw mips)
         run: cargo test -p fire-decode --locked --features psd,heif,icc,raw,mips
+
+      - name: Test, ktx
+        run: cargo test -p fire-decode --locked --features ktx
 
       - name: Test, psd-sdk-sys
         run: cargo test -p psd-sdk-sys --locked

@@ -19,6 +19,11 @@
 
 use crate::{Cx, DecodeError, PixelFormat, SheetKind, SheetLayout, Surfaces, level_dims};
 
+#[cfg(feature = "ktx")]
+pub(crate) mod mobile;
+#[cfg(feature = "ktx")]
+pub(crate) use mobile::Mobile;
+
 /// Half-precision 1.0, the alpha filled in for the alpha-less HDR formats.
 pub(crate) const HALF_ONE: u16 = 0x3c00;
 
@@ -28,6 +33,10 @@ pub(crate) const HALF_ONE: u16 = 0x3c00;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Block {
     Bc1,
+    /// BC1 with no alpha: Vulkan's and OpenGL's `BC1_RGB` / `DXT1 RGB`, where the third colour
+    /// mode's last index is opaque black. DDS has no such spelling — Direct3D reads every BC1 as
+    /// carrying a 1-bit alpha — so only KTX names it.
+    Bc1Rgb,
     Bc2,
     Bc3,
     Bc4(bool),
@@ -40,7 +49,7 @@ impl Block {
     /// Bytes per 4x4 block. BC1 and BC4 carry one endpoint pair; the rest carry two.
     fn block_bytes(self) -> usize {
         match self {
-            Block::Bc1 | Block::Bc4(_) => 8,
+            Block::Bc1 | Block::Bc1Rgb | Block::Bc4(_) => 8,
             _ => 16,
         }
     }
@@ -87,6 +96,9 @@ impl Plain {
 pub(crate) enum Codec {
     Block(Block),
     Plain(Plain),
+    /// ETC, EAC, ASTC and PVRTC, which only KTX and KTX2 carry.
+    #[cfg(feature = "ktx")]
+    Mobile(Mobile),
 }
 
 /// How the file stores its texels, and what they become.
@@ -137,6 +149,18 @@ impl Format {
         }
     }
 
+    /// A mobile block codec, which always decodes to `Rgba8Unorm`.
+    #[cfg(feature = "ktx")]
+    pub(crate) fn mobile(m: Mobile, bit_depth: u8, channels: u8, label: &'static str) -> Self {
+        Format {
+            codec: Codec::Mobile(m),
+            out: PixelFormat::Rgba8Unorm,
+            bit_depth,
+            channels,
+            label,
+        }
+    }
+
     /// Bytes one `w`x`h`x`d` surface occupies in the file, or `None` if that overflows.
     pub(crate) fn level_bytes(&self, w: u32, h: u32, d: u32) -> Option<usize> {
         let (w, h, d) = (w as usize, h as usize, d as usize);
@@ -151,7 +175,16 @@ impl Format {
                 .checked_mul(h)?
                 .checked_mul(p.texel_bytes())?
                 .checked_mul(d),
+            #[cfg(feature = "ktx")]
+            Codec::Mobile(m) => mobile::level_bytes(m, w as u32, h as u32, d as u32),
         }
+    }
+
+    /// Whether the codec can only be read at power-of-two sizes: PVRTC1, whose blocks borrow
+    /// colour from their neighbours across a grid that has to wrap evenly.
+    #[cfg(feature = "ktx")]
+    pub(crate) fn power_of_two_only(&self) -> bool {
+        matches!(self.codec, Codec::Mobile(Mobile::Pvrtc1 { .. }))
     }
 }
 
@@ -269,6 +302,20 @@ pub(crate) fn check_texture(
     Ok(())
 }
 
+/// How a texture's colour channels relate to its alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Alpha {
+    Straight,
+    /// Colour multiplied by alpha as stored: DDS's `DXT2` / `DXT4` and its DX10 alpha mode, and
+    /// a premultiplied KTX2 whose values are linear already.
+    Premultiplied,
+    /// Colour multiplied by alpha in linear light, then sRGB-encoded: a KTX2 whose descriptor
+    /// says premultiplied and sRGB, as KTX-Software writes one, and as a GPU's sRGB sampler blends
+    /// it. Divided out of the encoded values instead, a texel at alpha 0.25 comes back about
+    /// twice too bright, and clips.
+    PremultipliedInLinearLight,
+}
+
 /// One texture's surfaces, as [`assemble`] reads them.
 pub(crate) struct Shape {
     /// One surface's size at level 0.
@@ -306,14 +353,15 @@ pub(crate) struct Assembled {
 /// failing the decode: half an authored chain is still better than none, and the worker pads
 /// whatever is short. A volume's levels are volumes, so its first slice alone keeps no chain.
 ///
-/// `premultiplied` straightens the canvas and every level: colour stored already multiplied by
-/// alpha, displayed directly, renders every semi-transparent area about twice too dark.
+/// A premultiplied `alpha` straightens the canvas and every level: colour stored already
+/// multiplied by alpha, displayed directly, renders every semi-transparent area about twice too
+/// dark.
 pub(crate) fn assemble(
     cx: &Cx,
     out: PixelFormat,
     shape: &Shape,
     what: &str,
-    premultiplied: bool,
+    alpha: Alpha,
     mut cell: impl FnMut(u32, u32, u32, u32) -> Option<Vec<u8>>,
 ) -> Result<Assembled, DecodeError> {
     let (width, height) = (shape.width, shape.height);
@@ -346,10 +394,11 @@ pub(crate) fn assemble(
         source_mips.push(next);
     }
 
-    if premultiplied {
-        straighten(&mut pixels, out);
+    if alpha != Alpha::Straight {
+        let linear_light = alpha == Alpha::PremultipliedInLinearLight;
+        straighten(&mut pixels, out, linear_light);
         for level in &mut source_mips {
-            straighten(level, out);
+            straighten(level, out, linear_light);
         }
     }
 
@@ -424,6 +473,8 @@ pub(crate) fn decode_surface(fmt: &Format, src: &[u8], w: u32, h: u32) -> Vec<u8
     match fmt.codec {
         Codec::Block(b) => decode_blocks(b, src, w, h, &mut out, row, bpp),
         Codec::Plain(p) => decode_plain(p, src, fmt.out, &mut out),
+        #[cfg(feature = "ktx")]
+        Codec::Mobile(m) => mobile::decode(m, src, w, h, &mut out),
     }
     out
 }
@@ -489,15 +540,20 @@ fn emit_block(
     rows: usize,
 ) {
     match b {
-        Block::Bc1 | Block::Bc2 | Block::Bc3 | Block::Bc7 => {
+        Block::Bc1 | Block::Bc1Rgb | Block::Bc2 | Block::Bc3 | Block::Bc7 => {
             let f: fn(&[u8], &mut [u8], usize) = match b {
-                Block::Bc1 => bcdec_rs::bc1,
+                Block::Bc1 | Block::Bc1Rgb => bcdec_rs::bc1,
                 Block::Bc2 => bcdec_rs::bc2,
                 Block::Bc3 => bcdec_rs::bc3,
                 _ => bcdec_rs::bc7,
             };
             let mut s = [0u8; 4 * 4 * 4];
             f(blk, &mut s, 4 * 4);
+            if b == Block::Bc1Rgb {
+                for px in s.as_chunks_mut::<4>().0 {
+                    px[3] = 255;
+                }
+            }
             for y in 0..rows {
                 dst[y * row + xoff..y * row + xoff + cols * 4]
                     .copy_from_slice(&s[y * 16..y * 16 + cols * 4]);
@@ -769,9 +825,39 @@ fn packed_float_to_f32(v: u32, mantissa_bits: u32) -> f32 {
     }
 }
 
-/// Divide the colour channels back out of a premultiplied buffer.
-fn straighten(pixels: &mut [u8], format: PixelFormat) {
+/// Divide the colour channels back out of a premultiplied buffer: out of the stored values, or —
+/// `linear_light`, for an integer format — out of the linear light the sRGB-encoded values stand
+/// for, re-encoding the result. Float formats are linear already.
+fn straighten(pixels: &mut [u8], format: PixelFormat, linear_light: bool) {
     match format {
+        PixelFormat::Rgba8Unorm if linear_light => {
+            let decode: Vec<f32> = (0..256).map(|v| srgb_to_linear(v as f32 / 255.0)).collect();
+            for px in pixels.as_chunks_mut::<4>().0 {
+                let a = f32::from(px[3]) / 255.0;
+                if px[3] == 0 || px[3] == 255 {
+                    continue;
+                }
+                for c in &mut px[..3] {
+                    let s = linear_to_srgb((decode[usize::from(*c)] / a).min(1.0));
+                    *c = (s * 255.0).round() as u8;
+                }
+            }
+        }
+        PixelFormat::Rgba16Unorm if linear_light => {
+            for px in pixels.as_chunks_mut::<8>().0 {
+                let raw = u16::from_ne_bytes([px[6], px[7]]);
+                if raw == 0 || raw == u16::MAX {
+                    continue;
+                }
+                let a = f32::from(raw) / 65535.0;
+                for c in 0..3 {
+                    let v = f32::from(u16::from_ne_bytes([px[c * 2], px[c * 2 + 1]])) / 65535.0;
+                    let s = linear_to_srgb((srgb_to_linear(v) / a).min(1.0));
+                    let s = (s * 65535.0).round() as u16;
+                    px[c * 2..c * 2 + 2].copy_from_slice(&s.to_ne_bytes());
+                }
+            }
+        }
         PixelFormat::Rgba8Unorm => {
             for px in pixels.as_chunks_mut::<4>().0 {
                 let a = u32::from(px[3]);
@@ -825,6 +911,23 @@ fn straighten(pixels: &mut [u8], format: PixelFormat) {
                 }
             }
         }
+    }
+}
+
+/// The sRGB transfer curve, one way and back, on 0..=1.
+fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(v: f32) -> f32 {
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }
 

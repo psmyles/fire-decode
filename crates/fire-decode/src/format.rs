@@ -25,6 +25,8 @@ pub enum Format {
     RadianceHdr,
     Exr,
     Dds,
+    /// KTX2, Khronos' texture container: BCn, ETC / EAC, ASTC, PVRTC and Basis Universal.
+    Ktx2,
     /// PSD, and PSB by its extension. The crate reads PSD only: a PSB fails to decode, but is
     /// listed because fire-cli checks one from its header.
     Psd,
@@ -57,6 +59,7 @@ impl Format {
             Format::RadianceHdr => "Radiance HDR",
             Format::Exr => "OpenEXR",
             Format::Dds => "DDS",
+            Format::Ktx2 => "KTX2",
             Format::Psd => "PSD",
             Format::Heic => "HEIC",
             Format::Heif => "HEIF",
@@ -66,8 +69,8 @@ impl Format {
         }
     }
 
-    /// Whether this build decodes it. PSD needs the `psd` feature, HEIC / HEIF / AVIF `heif`, and
-    /// camera raw `raw`; the rest are always in. `Unknown` is not.
+    /// Whether this build decodes it. PSD needs the `psd` feature, HEIC / HEIF / AVIF `heif`,
+    /// camera raw `raw`, and KTX2 `ktx`; the rest are always in. `Unknown` is not.
     // The arms are `cfg!`s, so in a build without features they all fold to `false` and clippy
     // reads the match as a `matches!`; it is a table per feature.
     #[allow(clippy::match_like_matches_macro)]
@@ -76,6 +79,7 @@ impl Format {
             Format::Psd => cfg!(feature = "psd"),
             Format::Heic | Format::Heif | Format::Avif => cfg!(feature = "heif"),
             Format::CameraRaw => cfg!(feature = "raw"),
+            Format::Ktx2 => cfg!(feature = "ktx"),
             Format::Unknown => false,
             _ => true,
         }
@@ -87,6 +91,7 @@ impl Format {
             Format::Psd => Some("psd"),
             Format::Heic | Format::Heif | Format::Avif => Some("heif"),
             Format::CameraRaw => Some("raw"),
+            Format::Ktx2 => Some("ktx"),
             _ => None,
         }
     }
@@ -112,6 +117,7 @@ impl Format {
             "hdr" | "pic" | "rgbe" | "xyze" => Format::RadianceHdr,
             "exr" => Format::Exr,
             "dds" => Format::Dds,
+            "ktx2" => Format::Ktx2,
             "psd" | "psb" => Format::Psd,
             "heic" => Format::Heic,
             "heif" => Format::Heif,
@@ -133,7 +139,7 @@ pub fn all_extensions() -> &'static [&'static str] {
 }
 
 /// The extensions of the formats this build decodes ([`Format::is_supported`]): no `.psd` without
-/// `psd`, no `.heic` without `heif`, no `.nef` without `raw`. What an app's Open dialog, folder
+/// `psd`, no `.heic` without `heif`, no `.nef` without `raw`, no `.ktx2` without `ktx`. What an app's Open dialog, folder
 /// navigation and drag-and-drop accept.
 pub fn supported_extensions() -> &'static [&'static str] {
     static SUPPORTED: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
@@ -155,7 +161,7 @@ const ALL_EXTENSIONS: &[&str] = &[
     // Still formats, in the order the crate's doc lists the backends.
     "png", "jpg", "jpeg", "jpe", "jfif", "gif", "bmp", "dib", "tif", "tiff", "tx", "webp", "ico",
     "cur", "tga", "qoi", "ppm", "pgm", "pbm", "pnm", "pam", "ff", "jxl", "hdr", "pic", "rgbe",
-    "xyze", "exr", "dds", "psd", "psb", "heic", "heif", "avif", //
+    "xyze", "exr", "dds", "ktx2", "psd", "psb", "heic", "heif", "avif", //
     // Camera raw (embedded-preview decode). Mirrors `raw::EXT_LABELS`, which is what routes them;
     // `raw_extensions_are_all_listed` keeps the two honest.
     "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef", "srw",
@@ -190,6 +196,7 @@ mod tests {
         assert_eq!(has("avif"), cfg!(feature = "heif"));
         assert_eq!(has("nef"), cfg!(feature = "raw"));
         assert_eq!(has("dng"), cfg!(feature = "raw"));
+        assert_eq!(has("ktx2"), cfg!(feature = "ktx"));
         for e in ["png", "jpg", "exr", "dds", "tga", "hdr", "jxl"] {
             assert!(has(e), ".{e} is always in");
         }

@@ -352,7 +352,11 @@ pub fn decode(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
         fmt.out,
         &shape,
         "DDS",
-        premultiplied(&dds),
+        if premultiplied(&dds) {
+            texture::Alpha::Premultiplied
+        } else {
+            texture::Alpha::Straight
+        },
         |level, frame, fw, fh| {
             surface_bytes(&dds, &surfaces, &fmt, volume, level, frame, fw, fh)
                 .map(|src| decode_surface(&fmt, src, fw, fh))

@@ -78,6 +78,15 @@ lcms2 = { version = "=6.2.0", features = ["static"] }
 # DDS: the header parser and a BC1-BC7 (BC6H included) block decompressor, both pure Rust.
 ddsfile = "=0.6.0"
 bcdec_rs = "=0.2.1"
+# KTX and KTX2 (feature `ktx`), all pure Rust: KTX2's header, level index and data format
+# descriptor; the ETC1 / ETC2 / EAC / ASTC / PVRTC block decoders (with its default `alloc`,
+# without which 0.1.2 doesn't build; it adds Crunch decoders nothing calls); Basis Universal
+# (ETC1S, UASTC) and its Zstandard; and Zstandard for the other supercompressed levels, at the
+# major basisu asks for, so one copy links.
+ktx2 = { version = "=0.5.0", default-features = false, features = ["std"] }
+texture2ddecoder = "=0.1.2"
+basisu = { version = "=0.1.0", default-features = false, features = ["zstd"] }
+ruzstd = { version = "=0.7.3", default-features = false, features = ["std"] }
 # PSD's zip-compressed layer data.
 miniz_oxide = "=0.8.9"
 

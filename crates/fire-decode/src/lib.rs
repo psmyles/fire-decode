@@ -68,6 +68,8 @@ mod hdr;
 mod heif_meta;
 #[cfg(feature = "icc")]
 mod icc;
+#[cfg(feature = "ktx")]
+mod ktx;
 #[cfg(feature = "mips")]
 pub mod mips;
 mod narrow;
@@ -480,6 +482,9 @@ enum Backend {
     /// DDS (DirectDraw Surface); the game-development texture container, decompressed on the
     /// CPU by [`crate::dds`].
     Dds,
+    /// KTX2, Khronos' Vulkan-era texture container, by its 12-byte identifier; decompressed on the
+    /// CPU by `ktx::v2` (feature `ktx`).
+    Ktx2,
     /// A Windows cursor (`.cur`): an ICO container with a different type word, and two of its
     /// directory fields reused for the hotspot. The `image` crate's ICO decoder reads one
     /// unchanged but does not recognize the magic, so it is named for it here.
@@ -507,6 +512,7 @@ impl Backend {
             Backend::Tiff => Format::Tiff,
             Backend::Hdr => Format::RadianceHdr,
             Backend::Dds => Format::Dds,
+            Backend::Ktx2 => Format::Ktx2,
             Backend::Cur => Format::Cur,
             Backend::Tga => Format::Tga,
             Backend::Png => Format::Png,
@@ -606,6 +612,10 @@ fn route(bytes: &[u8], len: usize, ext: Option<&str>) -> Backend {
         // reads the modern formats of (BC4-BC7 and the DX10 header are all past `image`'s
         // DXT-only decoder), so it is sniffed here and handled by our own backend.
         Backend::Dds
+    } else if bytes.starts_with(&KTX2_MAGIC) {
+        // KTX2: a twelve-byte identifier nothing else starts with. Sniffed whatever this build
+        // decodes, so a build without `ktx` names it and says so, rather than handing it on.
+        Backend::Ktx2
     } else if bytes.starts_with(&[0x00, 0x00, 0x02, 0x00]) {
         // Byte 2 is the ICO/CUR type word, 1 for an icon and 2 for a cursor — but a cursor is
         // not the only thing that claims this magic. An uncompressed true-colour TGA opens with
@@ -733,6 +743,7 @@ fn decode_inner(
         }
         Backend::Hdr => decode_hdr(bytes, &cx)?,
         Backend::Dds => dds::decode(bytes, &cx)?,
+        Backend::Ktx2 => decode_ktx2(bytes, &cx)?,
         Backend::Cur => decode_cur(bytes, &cx)?,
         // Sniffed from its header, so it needs no extension hint to name itself.
         Backend::Tga => decode_image(bytes, Some("tga"), &cx)?,
@@ -1471,6 +1482,23 @@ fn decode_raw(bytes: &[u8], label: &'static str, cx: &Cx) -> Result<DecodedImage
     img.source.name = label;
     Ok(img)
 }
+
+/// KTX2 (feature `ktx`).
+#[cfg(feature = "ktx")]
+fn decode_ktx2(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    ktx::v2::decode(bytes, cx)
+}
+
+/// Stand-in for [`decode_ktx2`] in a build without `ktx`.
+#[cfg(not(feature = "ktx"))]
+fn decode_ktx2(_bytes: &[u8], _cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    Err(DecodeError::Unsupported(Format::Ktx2))
+}
+
+/// KTX2's file identifier: `«KTX 20»`, CR, LF, SUB, LF.
+const KTX2_MAGIC: [u8; 12] = [
+    0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+];
 
 /// Stand-in for [`decode_raw`] in a build without `raw`.
 #[cfg(not(feature = "raw"))]

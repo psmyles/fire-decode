@@ -125,6 +125,72 @@ fn dds(w: u32, h: u32, layers: Option<u32>, cube: bool) -> Vec<u8> {
     out
 }
 
+/// A KTX2 of `w`x`h` RGBA8 surfaces, `layers` deep (0 for none) with `faces` faces, two levels,
+/// laid out by hand (the `ktx2` crate is only there with the `ktx` feature, and this file is
+/// checked without it too). The data format descriptor is the basic block for
+/// `R8G8B8A8_UNORM`: four 8-bit samples.
+fn ktx2(w: u32, h: u32, layers: u32, faces: u32) -> Vec<u8> {
+    let surfaces = layers.max(1) * faces;
+    let level_bytes = |l: u32| ((w >> l).max(1) * (h >> l).max(1) * 4 * surfaces) as usize;
+    let mut dfd = Vec::new();
+    dfd.extend_from_slice(&92u32.to_le_bytes()); // dfdTotalSize
+    dfd.extend_from_slice(&0u32.to_le_bytes()); // vendor 0, descriptor type 0: basic
+    dfd.extend_from_slice(&2u16.to_le_bytes()); // version
+    dfd.extend_from_slice(&88u16.to_le_bytes()); // block size: 24 + 4 samples
+    dfd.extend_from_slice(&[1, 1, 2, 0]); // RGBSDA, BT.709, sRGB, straight alpha
+    dfd.extend_from_slice(&[0; 4]); // a 1x1x1x1 texel block
+    dfd.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0]); // 4 bytes in plane 0
+    for (channel, offset) in [(0u8, 0u16), (1, 8), (2, 16), (15, 24)] {
+        dfd.extend_from_slice(&offset.to_le_bytes());
+        dfd.extend_from_slice(&[7, channel]); // 8 bits (stored less one), the channel
+        dfd.extend_from_slice(&[0; 4]); // sample position
+        dfd.extend_from_slice(&0u32.to_le_bytes());
+        dfd.extend_from_slice(&255u32.to_le_bytes());
+    }
+    let dfd_off = 80 + 2 * 24;
+    let mut out = vec![0u8; dfd_off];
+    out.extend_from_slice(&dfd);
+    let mut offsets = [0usize; 2];
+    for l in [1, 0] {
+        while out.len() % 16 != 0 {
+            out.push(0);
+        }
+        offsets[l as usize] = out.len();
+        out.extend((0..level_bytes(l)).map(|i| i as u8));
+    }
+    out.push(0);
+    let mut h80 = vec![
+        0xAB, b'K', b'T', b'X', b' ', b'2', b'0', 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+    ];
+    for v in [
+        37,
+        1,
+        w,
+        h,
+        0,
+        layers,
+        faces,
+        2,
+        0,
+        dfd_off as u32,
+        92,
+        0,
+        0,
+    ] {
+        h80.extend_from_slice(&u32::to_le_bytes(v));
+    }
+    h80.extend_from_slice(&[0; 16]); // no supercompression global data
+    out[..80].copy_from_slice(&h80);
+    for (l, offset) in offsets.iter().enumerate() {
+        let at = 80 + 24 * l;
+        let len = level_bytes(l as u32) as u64;
+        out[at..at + 8].copy_from_slice(&(*offset as u64).to_le_bytes());
+        out[at + 8..at + 16].copy_from_slice(&len.to_le_bytes());
+        out[at + 16..at + 24].copy_from_slice(&len.to_le_bytes());
+    }
+    out
+}
+
 /// A raw 8-bit RGB PSD with a merged image.
 fn psd(w: u32, h: u32) -> Vec<u8> {
     let mut b = b"8BPS".to_vec();
@@ -172,6 +238,15 @@ fn generated() -> Vec<(String, Vec<u8>, &'static str)> {
         ("dds".into(), dds(8, 4, None, false), "dds"),
         ("dds cubemap".into(), dds(4, 4, Some(6), true), "dds"),
         ("dds array".into(), dds(4, 4, Some(3), false), "dds"),
+        ("ktx2".into(), ktx2(8, 4, 0, 1), "ktx2"),
+        ("ktx2 cubemap".into(), ktx2(4, 4, 0, 6), "ktx2"),
+        ("ktx2 array".into(), ktx2(4, 2, 3, 1), "ktx2"),
+        // Its data runs well past the 4 KiB probe reads: the header alone has the size.
+        (
+            "ktx2 past the probe's head".into(),
+            ktx2(64, 64, 0, 1),
+            "ktx2",
+        ),
         ("psd".into(), psd(5, 4), "psd"),
     ];
     // Samples that aren't whitespace: zune's PPM reader skips whitespace after the header.
@@ -207,7 +282,8 @@ fn every_generated_format_probes_as_it_decodes() {
         seen.push((name, format));
     }
     for (name, format) in &seen {
-        let compiled_out = name == "psd" && !cfg!(feature = "psd");
+        let compiled_out = (name == "psd" && !cfg!(feature = "psd"))
+            || (name.starts_with("ktx2") && !cfg!(feature = "ktx"));
         assert!(
             format.is_some() || compiled_out,
             "{name} didn't decode, so probe wasn't checked"
@@ -230,6 +306,15 @@ fn a_dds_sheet_probes_at_its_sheet_size() {
     assert_eq!((p.width, p.height), (12, 8), "six 4x4 faces tile 3x2");
 }
 
+#[cfg(feature = "ktx")]
+#[test]
+fn a_ktx2_sheet_probes_at_its_sheet_size() {
+    let p = probe(Cursor::new(ktx2(4, 4, 0, 6)), None).unwrap();
+    assert_eq!((p.width, p.height, p.format), (12, 8, Format::Ktx2));
+    let p = probe(Cursor::new(ktx2(4, 2, 3, 1)), None).unwrap();
+    assert_eq!((p.width, p.height), (8, 4), "three 4x2 layers tile 2x2");
+}
+
 #[test]
 fn garbage_is_an_error_not_a_panic() {
     for bytes in [
@@ -239,6 +324,8 @@ fn garbage_is_an_error_not_a_panic() {
         b"\0\0\0\x18ftypheic\0\0\0\0mif1heic",
         b"DDS ",
         b"8BPS",
+        // KTX2's identifier with nothing after it.
+        b"\xABKTX 20\xBB\r\n\x1A\n",
     ] {
         assert!(probe(Cursor::new(bytes), None).is_err(), "{bytes:?}");
     }

@@ -19,6 +19,9 @@ heif = ["dep:heif-sys"]
 icc = ["dep:lcms2", "dep:lcms2-sys"]
 # Camera raw, from its embedded JPEG preview.
 raw = []
+# KTX and KTX2, with their ETC / EAC / ASTC / PVRTC and Basis Universal payloads. Pure Rust, but
+# a feature all the same, so that an app which doesn't open them doesn't list `.ktx2` either.
+ktx = ["dep:ktx2", "dep:texture2ddecoder", "dep:basisu", "dep:ruzstd"]
 # The mip-chain builder fire and 3D Review upload textures with (FD11, `fire_decode::mips`).
 mips = []
 # Accept `panic = "abort"`, under which the crate's panic guard does nothing (FD7).
@@ -40,6 +43,10 @@ tiff.workspace = true
 exr.workspace = true
 ddsfile.workspace = true
 bcdec_rs.workspace = true
+ktx2 = { workspace = true, optional = true }
+texture2ddecoder = { workspace = true, optional = true }
+basisu = { workspace = true, optional = true }
+ruzstd = { workspace = true, optional = true }
 lcms2 = { workspace = true, optional = true }
 psd-sdk-sys = { workspace = true, optional = true }
 heif-sys = { workspace = true, optional = true }
