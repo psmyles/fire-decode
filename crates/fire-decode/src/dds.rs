@@ -2,17 +2,10 @@
 //!
 //! DDS is a container, not a codec: a 124-byte header (plus a 20-byte DX10 extension on modern
 //! files) followed by raw surface data in one of ~100 pixel formats. The two halves are split
-//! here the same way. `ddsfile` parses the header, and `bcdec_rs` — a safe port of iOrange's
+//! here the same way. `ddsfile` parses the header, and this module maps it onto the codecs the
+//! texture containers share ([`crate::texture`]), where `bcdec_rs` — a safe port of iOrange's
 //! `bcdec` — decodes the block-compressed payloads. Both are pure Rust, so this backend needs no
 //! vendored native tree and builds on every target the viewer does.
-//!
-//! **The payload is decompressed, not uploaded compressed.** sokol_gfx can take BC1-BC7 blocks
-//! straight to the GPU, and that would be exact and cheap — but [`DecodedImage`] is an
-//! *uncompressed RGBA canvas* by contract, and everything downstream reads it as one: the mip
-//! builder, the downscale guard, the alpha scan, the flipbook grid detector. Teaching all of
-//! them about block payloads to save tens of milliseconds on a decode that already runs off the
-//! UI thread is a bad trade, so the blocks are expanded here and the rest of the viewer never
-//! learns DDS exists.
 //!
 //! What the formats map to:
 //!
@@ -31,7 +24,7 @@
 //!
 //! Signed block formats (`BC4_SNorm`, `BC5_SNorm`) are re-centred for display: `bcdec` hands
 //! back the raw -127..127 range reinterpreted as bytes, which would show a normal map as noise,
-//! so [`snorm_to_unorm`] maps it to 0..255 the way a sampler would.
+//! so they are mapped to 0..255 the way a sampler would.
 //!
 //! The file's own mip chain comes along in [`DecodedImage::source_mips`], and a file holding more
 //! than one surface — a cubemap's six faces, a texture array's layers, a volume's depth slices —
@@ -40,134 +33,10 @@
 
 use ddsfile::{Dds, DxgiFormat, FourCC, PixelFormatFlags};
 
-use crate::{
-    Cx, DecodeError, DecodedImage, PixelFormat, SheetKind, SheetLayout, SourceInfo, Surfaces,
-    level_dims,
-};
-
-/// Half-precision 1.0, the alpha filled in for the alpha-less HDR formats.
-const HALF_ONE: u16 = 0x3c00;
+use crate::texture::{self, Block, Format, Plain, Shape, decode_surface, mask_width, masked};
+use crate::{Cx, DecodeError, DecodedImage, PixelFormat, SheetKind, SheetLayout, SourceInfo};
 
 // --- format identification -----------------------------------------------------------------
-
-/// A block-compressed payload. The `bool` is "the channels are signed".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Block {
-    Bc1,
-    Bc2,
-    Bc3,
-    Bc4(bool),
-    Bc5(bool),
-    Bc6h(bool),
-    Bc7,
-}
-
-impl Block {
-    /// Bytes per 4x4 block. BC1 and BC4 carry one endpoint pair; the rest carry two.
-    fn block_bytes(self) -> usize {
-        match self {
-            Block::Bc1 | Block::Bc4(_) => 8,
-            _ => 16,
-        }
-    }
-}
-
-/// An uncompressed payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Plain {
-    /// Integer channels carved out of a `bytes`-wide little-endian unit by the header's R/G/B/A
-    /// bit masks. This one arm covers every legacy D3D9 layout — `A8R8G8B8`, `X8B8G8R8`,
-    /// `R5G6B5`, `A2R10G10B10`, `L8`, `A8` — plus whatever masks an exporter invents, because it
-    /// reads the masks rather than matching a table of known ones. `luminance` replicates the red
-    /// channel across green and blue (a grey or single-channel source).
-    Masked {
-        bytes: u8,
-        masks: [u32; 4],
-        luminance: bool,
-    },
-    /// `n` unsigned 16-bit channels in R, G, B, A order.
-    U16(u8),
-    /// `n` half-float channels.
-    F16(u8),
-    /// `n` 32-bit float channels.
-    F32(u8),
-    /// Three unsigned floats packed 11/11/10 into one 32-bit word.
-    R11G11B10,
-    /// Three 9-bit mantissas sharing one 5-bit exponent, packed into 32 bits.
-    R9G9B9E5,
-}
-
-impl Plain {
-    /// Bytes per texel in the file.
-    fn texel_bytes(self) -> usize {
-        match self {
-            Plain::Masked { bytes, .. } => bytes as usize,
-            Plain::U16(n) | Plain::F16(n) => 2 * n as usize,
-            Plain::F32(n) => 4 * n as usize,
-            Plain::R11G11B10 | Plain::R9G9B9E5 => 4,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Codec {
-    Block(Block),
-    Plain(Plain),
-}
-
-/// How the file stores its texels, and what they become.
-#[derive(Debug, Clone, Copy)]
-struct Format {
-    codec: Codec,
-    /// The [`DecodedImage`] layout this decodes to.
-    out: PixelFormat,
-    /// Bits per channel of the source, for the status bar.
-    bit_depth: u8,
-    /// The source's meaningful channel count. Two-channel sources (BC5, R16G16) report 3: they
-    /// are displayed as RGB with a zero blue lane, and calling them "Gray+A" would be a lie.
-    channels: u8,
-    /// The status-bar name for the encoding.
-    label: &'static str,
-}
-
-impl Format {
-    fn block(b: Block, out: PixelFormat, bit_depth: u8, channels: u8, label: &'static str) -> Self {
-        Format {
-            codec: Codec::Block(b),
-            out,
-            bit_depth,
-            channels,
-            label,
-        }
-    }
-
-    fn plain(p: Plain, out: PixelFormat, bit_depth: u8, channels: u8, label: &'static str) -> Self {
-        Format {
-            codec: Codec::Plain(p),
-            out,
-            bit_depth,
-            channels,
-            label,
-        }
-    }
-
-    /// Bytes one `w`x`h`x`d` surface occupies in the file, or `None` if that overflows.
-    fn level_bytes(&self, w: u32, h: u32, d: u32) -> Option<usize> {
-        let (w, h, d) = (w as usize, h as usize, d as usize);
-        match self.codec {
-            // Block formats round up to whole 4x4 blocks, so a 5x3 level still costs 2x1 blocks.
-            Codec::Block(b) => w
-                .div_ceil(4)
-                .checked_mul(h.div_ceil(4))?
-                .checked_mul(b.block_bytes())?
-                .checked_mul(d),
-            Codec::Plain(p) => w
-                .checked_mul(h)?
-                .checked_mul(p.texel_bytes())?
-                .checked_mul(d),
-        }
-    }
-}
 
 /// Identify the payload from the header. `None` for a format we have no decoder for, which the
 /// caller turns into a `Malformed` naming it.
@@ -311,48 +180,6 @@ fn from_fourcc(cc: u32) -> Option<Format> {
     })
 }
 
-/// Build a masked format, choosing the output depth from the widest channel: a 10- or 16-bit
-/// lane keeps its precision in `Rgba16Unorm` rather than being crushed to 8.
-fn masked(bytes: u8, masks: [u32; 4], luminance: bool, label: &'static str) -> Format {
-    let widest = masks.iter().copied().map(mask_width).max().unwrap_or(0);
-    let out = if widest > 8 {
-        PixelFormat::Rgba16Unorm
-    } else {
-        PixelFormat::Rgba8Unorm
-    };
-    // One colour lane (or an explicit luminance flag) means grey: replicate red across green and
-    // blue rather than showing an R8 height map as a red one.
-    let colour = u8::from(masks[0] != 0) + u8::from(masks[1] != 0) + u8::from(masks[2] != 0);
-    let grey = luminance || colour <= 1;
-    let has_alpha = masks[3] != 0;
-    let channels = match (grey, has_alpha) {
-        (true, true) => 2,
-        (true, false) => 1,
-        (false, true) => 4,
-        (false, false) => 3,
-    };
-    Format::plain(
-        Plain::Masked {
-            bytes,
-            masks,
-            luminance: grey,
-        },
-        out,
-        widest.max(1) as u8,
-        channels,
-        label,
-    )
-}
-
-/// Bits in a (contiguous) channel mask.
-fn mask_width(m: u32) -> u32 {
-    if m == 0 {
-        0
-    } else {
-        (m >> m.trailing_zeros()).count_ones()
-    }
-}
-
 /// A header that describes its channels with bit masks rather than a FourCC.
 fn from_masks(spf: &ddsfile::PixelFormat) -> Option<Format> {
     let bits = spf.rgb_bit_count?;
@@ -486,10 +313,10 @@ impl Stored {
 /// Decode a DDS from memory, normalized to RGBA.
 ///
 /// A single-surface file decodes to its one surface. A cubemap, texture array or volume is, with
-/// [`Surfaces::Sheet`], composited into one sheet and described by a [`SheetLayout`], so the
-/// viewer's flipbook can step through the faces or slices with the transport it already has; with
-/// [`Surfaces::First`] it decodes to its first surface alone. The file's own mips come back only
-/// when the setup keeps them (`stored_mips`), and are not decoded otherwise.
+/// [`Surfaces::Sheet`](crate::Surfaces::Sheet), composited into one sheet and described by a
+/// [`SheetLayout`]; with [`Surfaces::First`](crate::Surfaces::First) it decodes to its first
+/// surface alone. The file's own mips come back only when the setup keeps them (`stored_mips`),
+/// and are not decoded otherwise ([`texture::assemble`]).
 pub fn decode(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
     let dds = Dds::read(bytes).map_err(|e| DecodeError::Malformed(format!("DDS: {e}")))?;
     let fmt = identify(&dds).ok_or_else(|| {
@@ -503,114 +330,53 @@ pub fn decode(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
         )));
     }
 
-    // The guard runs on the header's bare claim *first*, before the surface walk below reads
-    // anything else from it. Order matters beyond tidiness: a decode bomb has to come back as
-    // `TooLarge` — "we refused this" — and not as the `Malformed` that a walk over its absurd
-    // (and therefore truncated) surface data would produce first.
-    cx.check_dims(
-        width as usize,
-        height as usize,
-        fmt.out.bytes_per_pixel(),
-        "DDS",
-    )?;
-
-    // A cubemap's sheet is six times the surface its header describes, so the product is guarded
-    // too — from the grid the *header* asks for, before the payload is consulted at all. A guard
-    // that only fired once the data was known to be present would be no guard: the interesting
-    // case is a header claiming far more than the file could ever hold.
-    let sheet = cx.opts.surfaces == Surfaces::Sheet;
-    let declared = layout_for(&dds, dds.get_num_array_layers().max(1)).filter(|_| sheet);
-    if let Some(l) = declared {
-        cx.check_dims(
-            width.checked_mul(l.cols).ok_or_else(too_large)? as usize,
-            height.checked_mul(l.rows).ok_or_else(too_large)? as usize,
-            fmt.out.bytes_per_pixel(),
-            "DDS sheet",
-        )?;
-    }
+    // The guard runs on the header's bare claim first — one surface, and the sheet of every
+    // layer the header declares — before the surface walk below reads anything else from it.
+    let declared = layout_for(&dds, dds.get_num_array_layers().max(1));
+    texture::check_texture(cx, fmt.out, width, height, declared, "DDS")?;
 
     let surfaces = Stored::new(&dds, &fmt, dds.data.len())?;
     // The layout the data actually backs, which is what gets tiled. `Stored` has already
     // clamped the layer count to the bytes present, so a header claiming a hundred layers over a
     // six-layer file lays out six.
-    let all = layout_for(&dds, surfaces.layers);
-    let layout = all.filter(|_| sheet);
-    let (cols, rows) = layout.map_or((1, 1), |l| (l.cols, l.rows));
-    let (out_w, out_h) = (
-        width.checked_mul(cols).ok_or_else(too_large)?,
-        height.checked_mul(rows).ok_or_else(too_large)?,
-    );
-
-    let truncated = || DecodeError::Malformed("DDS surface data is truncated".into());
-    let mut pixels = match (layout, all) {
-        // A sheet of every surface.
-        (Some(l), _) => composite_level(&fmt, &dds, &surfaces, 0, l).ok_or_else(truncated)?,
-        // The first surface of several (`Surfaces::First`): a volume's first slice, or layer 0.
-        (None, Some(l)) => {
-            let src = surface_bytes(&dds, &surfaces, 0, 0, l, &fmt, width, height)
-                .ok_or_else(truncated)?;
-            decode_surface(&fmt, src, width, height)
-        }
-        // The common case: one surface, decoded straight into the canvas with no tiling copy.
-        (None, None) => {
-            let range = surfaces
-                .range(0, 0)
-                .ok_or_else(|| DecodeError::Malformed("DDS has no surfaces".into()))?;
-            let src = dds.data.get(range).ok_or_else(truncated)?;
-            decode_surface(&fmt, src, width, height)
-        }
+    let shape = Shape {
+        width,
+        height,
+        levels: surfaces.levels,
+        all: layout_for(&dds, surfaces.layers),
     };
-
-    // The file's own chain, levels 1.. — authored, often with a better filter than a box, and
-    // the whole reason to look at a `.dds` mip rather than a computed one. A level whose bytes
-    // are missing — or, for a sheet, whose surfaces no longer tile it exactly — ends the chain
-    // rather than failing the decode: half an authored chain is still better than none, and the
-    // worker pads whatever is short.
-    let mut source_mips = Vec::new();
-    // A volume's levels are volumes, so its first slice has no chain of its own to keep.
-    let keep_mips = cx.opts.stored_mips
-        && !(layout.is_none() && all.is_some_and(|l| l.kind == SheetKind::VolumeSlices));
-    for level in (1..surfaces.levels).filter(|_| keep_mips) {
-        let next = match layout {
-            None => {
-                let (lw, lh) = level_dims(width, height, level);
-                surfaces
-                    .range(0, level)
-                    .and_then(|r| dds.data.get(r))
-                    .map(|src| decode_surface(&fmt, src, lw, lh))
-            }
-            Some(l) => composite_level(&fmt, &dds, &surfaces, level, l),
-        };
-        let Some(next) = next else { break };
-        source_mips.push(next);
-    }
-
+    let volume = shape.all.is_some_and(|l| l.kind == SheetKind::VolumeSlices);
     // `DXT2`/`DXT4`, and any DX10 header that says so, store colour already multiplied by alpha.
-    // Displaying that directly renders every semi-transparent area about twice too dark.
-    if premultiplied(&dds) {
-        straighten(&mut pixels, fmt.out);
-        for level in &mut source_mips {
-            straighten(level, fmt.out);
-        }
-    }
+    let img = texture::assemble(
+        cx,
+        fmt.out,
+        &shape,
+        "DDS",
+        premultiplied(&dds),
+        |level, frame, fw, fh| {
+            surface_bytes(&dds, &surfaces, &fmt, volume, level, frame, fw, fh)
+                .map(|src| decode_surface(&fmt, src, fw, fh))
+        },
+    )?;
 
     Ok(DecodedImage {
-        pixels,
+        pixels: img.pixels,
         format: fmt.out,
         source: SourceInfo::new(crate::Format::Dds, fmt.label, fmt.channels, fmt.bit_depth),
         icc: None,
         alpha_opaque: false, // set by `decode` after the final buffer is built
-        width: out_w,
-        height: out_h,
+        width: img.width,
+        height: img.height,
         downscaled_from: None,
-        source_mips: (!source_mips.is_empty()).then_some(source_mips),
-        layout,
+        source_mips: img.source_mips,
+        layout: img.layout,
         animation: None,
     })
 }
 
-/// The size [`decode`] returns for a DDS with [`Surfaces::Sheet`], from the file's first bytes
-/// (`head`, its header at least) and its length: one surface, or the sheet the data backs (FD19).
+/// The size [`decode`] returns for a DDS with [`Surfaces::Sheet`](crate::Surfaces::Sheet), from
+/// the file's first bytes (`head`, its header at least) and its length: one surface, or the sheet
+/// the data backs (FD19).
 pub(crate) fn probe_dims(head: &[u8], len: usize) -> Result<(u32, u32), DecodeError> {
     let dds = Dds::read(head).map_err(|e| DecodeError::Malformed(format!("DDS: {e}")))?;
     let fmt = identify(&dds).ok_or_else(|| {
@@ -626,20 +392,12 @@ pub(crate) fn probe_dims(head: &[u8], len: usize) -> Result<(u32, u32), DecodeEr
     let header_len = 4 + 124 + if dds.header10.is_some() { 20 } else { 0 };
     let stored = Stored::new(&dds, &fmt, len.saturating_sub(header_len))?;
     let (cols, rows) = layout_for(&dds, stored.layers).map_or((1, 1), |l| (l.cols, l.rows));
+    let too_large = || texture::too_large("DDS");
     Ok((
         width.checked_mul(cols).ok_or_else(too_large)?,
         height.checked_mul(rows).ok_or_else(too_large)?,
     ))
 }
-
-/// The `TooLarge` a header's own arithmetic overflowing earns.
-fn too_large() -> DecodeError {
-    DecodeError::TooLarge("DDS sheet dimensions overflow".into())
-}
-
-/// The widest grid axis a sheet is tiled into. Matches the viewer's own flipbook grid limit — a
-/// sheet wider than that could not be read back by the transport that displays it.
-const MAX_GRID_AXIS: u32 = 64;
 
 /// How a file's `layers` array layers are laid out, or `None` for the ordinary single-surface
 /// case. Depth is read first: a volume is one array layer holding many slices, where a cubemap or
@@ -666,104 +424,38 @@ fn layout_for(dds: &Dds, layers: u32) -> Option<SheetLayout> {
     } else {
         return None;
     };
-    let (cols, rows) = layout_grid(frames)?;
-    Some(SheetLayout {
-        cols,
-        rows,
-        frames: frames.min(cols * rows),
-        kind,
-    })
+    texture::sheet_layout(frames, kind)
 }
 
-/// The grid `frames` surfaces tile into: as near square as it gets, filled row-major.
-///
-/// A single strip would be simpler and much worse — six 4096 faces side by side is a 24576-wide
-/// canvas, most of the way to a decode-guard rejection for a texture that tiles comfortably as
-/// 3x2. Square-ish is also how a cubemap is conventionally drawn.
-fn layout_grid(frames: u32) -> Option<(u32, u32)> {
-    if frames == 0 || frames > MAX_GRID_AXIS * MAX_GRID_AXIS {
-        return None;
-    }
-    let cols = (f64::from(frames).sqrt().ceil() as u32).clamp(1, MAX_GRID_AXIS);
-    let rows = frames.div_ceil(cols).min(MAX_GRID_AXIS);
-    Some((cols, rows))
-}
-
-/// Decode every surface of mip `level` and tile them into one sheet, row-major.
-///
-/// `None` when a surface's bytes are missing, or — for a mip level — when the surfaces no longer
-/// tile the sheet exactly. That second case is the honest one: past the point where
-/// `cols * (w >> n)` stops equalling `(cols * w) >> n`, a tiled level is not a level *of* the
-/// sheet it claims to belong to, and the chain would sample the wrong texels. For a
-/// power-of-two face — which is nearly every real cubemap — it holds all the way down.
-fn composite_level(
-    fmt: &Format,
-    dds: &Dds,
-    surfaces: &Stored,
-    level: u32,
-    layout: SheetLayout,
-) -> Option<Vec<u8>> {
-    let (w, h) = (dds.header.width, dds.header.height);
-    let (fw, fh) = level_dims(w, h, level);
-    let (sheet_w, sheet_h) = level_dims(
-        w.checked_mul(layout.cols)?,
-        h.checked_mul(layout.rows)?,
-        level,
-    );
-    if fw.checked_mul(layout.cols)? != sheet_w || fh.checked_mul(layout.rows)? != sheet_h {
-        return None;
-    }
-
-    let bpp = fmt.out.bytes_per_pixel();
-    let sheet_row = (sheet_w as usize).checked_mul(bpp)?;
-    let cell_row = (fw as usize).checked_mul(bpp)?;
-    // Trailing cells of a partly filled grid stay transparent black.
-    let mut out = vec![0u8; sheet_row.checked_mul(sheet_h as usize)?];
-
-    for frame in 0..layout.frames {
-        let src = surface_bytes(dds, surfaces, level, frame, layout, fmt, fw, fh)?;
-        let cell = decode_surface(fmt, src, fw, fh);
-        let x0 = (frame % layout.cols) as usize * cell_row;
-        let y0 = (frame / layout.cols) as usize * fh as usize;
-        for y in 0..fh as usize {
-            let dst = (y0 + y) * sheet_row + x0;
-            out[dst..dst + cell_row].copy_from_slice(&cell[y * cell_row..y * cell_row + cell_row]);
-        }
-    }
-    Some(out)
-}
-
-/// The bytes of one surface: an array layer of its own for a cubemap or an array, or one depth
-/// slice carved out of the single layer's level for a volume.
+/// The bytes of one surface: an array layer of its own for a cubemap or an array (and, for a
+/// single surface, layer 0), or one depth slice carved out of the single layer's level for a
+/// volume.
 #[allow(clippy::too_many_arguments)]
 fn surface_bytes<'a>(
     dds: &'a Dds,
     surfaces: &Stored,
+    fmt: &Format,
+    volume: bool,
     level: u32,
     frame: u32,
-    layout: SheetLayout,
-    fmt: &Format,
     fw: u32,
     fh: u32,
 ) -> Option<&'a [u8]> {
-    match layout.kind {
-        SheetKind::VolumeSlices => {
-            // A volume's level holds every slice back to back, so one slice is that level's range
-            // divided by the slice count.
-            let range = surfaces.range(0, level)?;
-            let slice = fmt.level_bytes(fw, fh, 1)?;
-            let start = range
-                .start
-                .checked_add((frame as usize).checked_mul(slice)?)?;
-            let end = start.checked_add(slice)?;
-            if end > range.end {
-                return None;
-            }
-            dds.data.get(start..end)
+    if volume {
+        // A volume's level holds every slice back to back, so one slice is that level's range
+        // divided by the slice count.
+        let range = surfaces.range(0, level)?;
+        let slice = fmt.level_bytes(fw, fh, 1)?;
+        let start = range
+            .start
+            .checked_add((frame as usize).checked_mul(slice)?)?;
+        let end = start.checked_add(slice)?;
+        if end > range.end {
+            return None;
         }
-        SheetKind::CubeFaces | SheetKind::ArrayLayers => {
-            dds.data.get(surfaces.range(frame, level)?)
-        }
+        dds.data.get(start..end)
+    } else {
+        dds.data.get(surfaces.range(frame, level)?)
     }
 }
 
@@ -776,449 +468,4 @@ fn premultiplied(dds: &Dds) -> bool {
         dds.header.spf.fourcc.as_ref().map(|f| f.0),
         Some(FourCC::DXT2 | FourCC::DXT4)
     )
-}
-
-/// Decode one surface into a fresh RGBA buffer. `src` is exactly that surface's bytes.
-fn decode_surface(fmt: &Format, src: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let bpp = fmt.out.bytes_per_pixel();
-    let row = w as usize * bpp;
-    let mut out = vec![0u8; row * h as usize];
-    match fmt.codec {
-        Codec::Block(b) => decode_blocks(b, src, w, h, &mut out, row, bpp),
-        Codec::Plain(p) => decode_plain(p, src, fmt.out, &mut out),
-    }
-    out
-}
-
-/// Surfaces with at least this many texels are expanded on several threads. Below it the
-/// hand-off costs more than the work — the same threshold the mip builder uses.
-const PARALLEL_MIN_TEXELS: usize = 256 * 256;
-
-/// Expand block-compressed `src` into `out`, one 4x4 block at a time.
-fn decode_blocks(b: Block, src: &[u8], w: u32, h: u32, out: &mut [u8], row: usize, bpp: usize) {
-    let bw = (w as usize).div_ceil(4);
-    let bsz = b.block_bytes();
-    let w = w as usize;
-
-    // One unit of work is a block row: four output rows, fewer at the bottom edge.
-    let block_row = |by: usize, dst: &mut [u8]| {
-        let rows = dst.len() / row;
-        for bx in 0..bw {
-            let off = (by * bw + bx) * bsz;
-            let Some(blk) = src.get(off..off + bsz) else {
-                return;
-            };
-            let x0 = bx * 4;
-            emit_block(b, blk, dst, row, x0 * bpp, (w - x0).min(4), rows);
-        }
-    };
-
-    let block_rows = (h as usize).div_ceil(4);
-    let threads = if w * h as usize >= PARALLEL_MIN_TEXELS {
-        std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .clamp(1, 8)
-            .min(block_rows.max(1))
-    } else {
-        1
-    };
-    if threads <= 1 {
-        for (by, dst) in out.chunks_mut(4 * row).enumerate() {
-            block_row(by, dst);
-        }
-    } else {
-        let rows_per = block_rows.div_ceil(threads);
-        std::thread::scope(|scope| {
-            for (i, chunk) in out.chunks_mut(rows_per * 4 * row).enumerate() {
-                let block_row = &block_row;
-                scope.spawn(move || {
-                    for (j, dst) in chunk.chunks_mut(4 * row).enumerate() {
-                        block_row(i * rows_per + j, dst);
-                    }
-                });
-            }
-        });
-    }
-}
-
-/// Decode one 4x4 block and scatter its in-bounds texels into `dst`, a band of up to four output
-/// rows. Each codec decodes into a scratch block of its own natural layout first, which is what
-/// keeps the edge blocks of a non-multiple-of-4 surface from writing out of bounds.
-fn emit_block(
-    b: Block,
-    blk: &[u8],
-    dst: &mut [u8],
-    row: usize,
-    xoff: usize,
-    cols: usize,
-    rows: usize,
-) {
-    match b {
-        Block::Bc1 | Block::Bc2 | Block::Bc3 | Block::Bc7 => {
-            let f: fn(&[u8], &mut [u8], usize) = match b {
-                Block::Bc1 => bcdec_rs::bc1,
-                Block::Bc2 => bcdec_rs::bc2,
-                Block::Bc3 => bcdec_rs::bc3,
-                _ => bcdec_rs::bc7,
-            };
-            let mut s = [0u8; 4 * 4 * 4];
-            f(blk, &mut s, 4 * 4);
-            for y in 0..rows {
-                dst[y * row + xoff..y * row + xoff + cols * 4]
-                    .copy_from_slice(&s[y * 16..y * 16 + cols * 4]);
-            }
-        }
-        Block::Bc4(signed) => {
-            let mut s = [0u8; 4 * 4];
-            bcdec_rs::bc4(blk, &mut s, 4, signed);
-            for y in 0..rows {
-                for x in 0..cols {
-                    let v = snorm_to_unorm(s[y * 4 + x], signed);
-                    dst[y * row + xoff + x * 4..][..4].copy_from_slice(&[v, v, v, 255]);
-                }
-            }
-        }
-        Block::Bc5(signed) => {
-            let mut s = [0u8; 4 * 4 * 2];
-            bcdec_rs::bc5(blk, &mut s, 4 * 2, signed);
-            for y in 0..rows {
-                for x in 0..cols {
-                    let r = snorm_to_unorm(s[y * 8 + x * 2], signed);
-                    let g = snorm_to_unorm(s[y * 8 + x * 2 + 1], signed);
-                    dst[y * row + xoff + x * 4..][..4].copy_from_slice(&[r, g, 0, 255]);
-                }
-            }
-        }
-        Block::Bc6h(signed) => {
-            let mut s = [0u16; 4 * 4 * 3];
-            bcdec_rs::bc6h_half(blk, &mut s, 4 * 3, signed);
-            for y in 0..rows {
-                for x in 0..cols {
-                    let p = y * 12 + x * 3;
-                    let d = &mut dst[y * row + xoff + x * 8..][..8];
-                    d[0..2].copy_from_slice(&s[p].to_ne_bytes());
-                    d[2..4].copy_from_slice(&s[p + 1].to_ne_bytes());
-                    d[4..6].copy_from_slice(&s[p + 2].to_ne_bytes());
-                    d[6..8].copy_from_slice(&HALF_ONE.to_ne_bytes());
-                }
-            }
-        }
-    }
-}
-
-/// Re-centre a signed block channel for display. `bcdec` hands back the -127..127 range
-/// reinterpreted as a byte, so a signed normal map would otherwise show as noise; this is the
-/// mapping a sampler applies, with 0 landing on mid-grey.
-fn snorm_to_unorm(v: u8, signed: bool) -> u8 {
-    if !signed {
-        return v;
-    }
-    let x = i32::from((v as i8).max(-127)) + 127; // 0..254
-    ((x * 255 + 127) / 254) as u8
-}
-
-/// Expand an uncompressed surface into `out`, split across threads like the block codecs.
-fn decode_plain(p: Plain, src: &[u8], out_format: PixelFormat, out: &mut [u8]) {
-    let bpp = out_format.bytes_per_pixel();
-    let stride = p.texel_bytes();
-    crate::par_chunks_mut(out, bpp, |offset, part| {
-        let src = src.get(offset / bpp * stride..).unwrap_or_default();
-        match byte_lanes(p, out_format) {
-            Some(lanes) => copy_byte_lanes(lanes, src, part),
-            None => decode_plain_texels(p, src, out_format, part),
-        }
-    });
-}
-
-/// Where R, G, B and A sit in a 4-byte texel whose masks are each one whole byte (alpha may be
-/// absent: `None`), for an 8-bit output — RGBA8, BGRA8 and their X variants, which is nearly every
-/// uncompressed DDS. For those the general mask arithmetic reduces exactly to picking bytes.
-fn byte_lanes(p: Plain, out_format: PixelFormat) -> Option<([usize; 3], Option<usize>)> {
-    let Plain::Masked {
-        bytes: 4,
-        masks,
-        luminance: false,
-    } = p
-    else {
-        return None;
-    };
-    if out_format != PixelFormat::Rgba8Unorm {
-        return None;
-    }
-    let lane = |m: u32| {
-        let at = m.trailing_zeros();
-        (at.is_multiple_of(8) && m >> at == 0xff).then_some(at as usize / 8)
-    };
-    let rgb = [lane(masks[0])?, lane(masks[1])?, lane(masks[2])?];
-    let alpha = match masks[3] {
-        0 => None,
-        m => Some(lane(m)?),
-    };
-    Some((rgb, alpha))
-}
-
-fn copy_byte_lanes(([r, g, b], alpha): ([usize; 3], Option<usize>), src: &[u8], out: &mut [u8]) {
-    let texels = src.as_chunks::<4>().0;
-    let out = out.as_chunks_mut::<4>().0;
-    match alpha {
-        Some(a) => {
-            for (d, s) in out.iter_mut().zip(texels) {
-                *d = [s[r], s[g], s[b], s[a]];
-            }
-        }
-        None => {
-            for (d, s) in out.iter_mut().zip(texels) {
-                *d = [s[r], s[g], s[b], 255];
-            }
-        }
-    }
-}
-
-/// [`decode_plain`]'s general case: one texel at a time, any layout.
-fn decode_plain_texels(p: Plain, src: &[u8], out_format: PixelFormat, out: &mut [u8]) {
-    let bpp = out_format.bytes_per_pixel();
-    let texels = out.len() / bpp;
-    let stride = p.texel_bytes();
-    for i in 0..texels {
-        let Some(unit) = src.get(i * stride..i * stride + stride) else {
-            return;
-        };
-        let d = &mut out[i * bpp..i * bpp + bpp];
-        match p {
-            Plain::Masked {
-                masks, luminance, ..
-            } => {
-                let word = read_le(unit);
-                let to = if out_format == PixelFormat::Rgba16Unorm {
-                    0xffff
-                } else {
-                    0xff
-                };
-                let r = channel(word, masks[0], to);
-                let (g, b) = if luminance {
-                    (r, r)
-                } else {
-                    (channel(word, masks[1], to), channel(word, masks[2], to))
-                };
-                let a = if masks[3] == 0 {
-                    to
-                } else {
-                    channel(word, masks[3], to)
-                };
-                if to == 0xffff {
-                    store_u16(d, [r as u16, g as u16, b as u16, a as u16]);
-                } else {
-                    d.copy_from_slice(&[r as u8, g as u8, b as u8, a as u8]);
-                }
-            }
-            Plain::U16(n) => {
-                store_u16(
-                    d,
-                    spread(n, u16::MAX, 0, |c| {
-                        u16::from_le_bytes([unit[c * 2], unit[c * 2 + 1]])
-                    }),
-                );
-            }
-            Plain::F16(n) => {
-                store_u16(
-                    d,
-                    spread(n, HALF_ONE, 0, |c| {
-                        u16::from_le_bytes([unit[c * 2], unit[c * 2 + 1]])
-                    }),
-                );
-            }
-            Plain::F32(n) => {
-                store_f32(
-                    d,
-                    spread(n, 1.0, 0.0, |c| {
-                        f32::from_le_bytes([
-                            unit[c * 4],
-                            unit[c * 4 + 1],
-                            unit[c * 4 + 2],
-                            unit[c * 4 + 3],
-                        ])
-                    }),
-                );
-            }
-            Plain::R11G11B10 => {
-                let w = read_le(unit);
-                store_f32(
-                    d,
-                    [
-                        packed_float_to_f32(w & 0x7ff, 6),
-                        packed_float_to_f32((w >> 11) & 0x7ff, 6),
-                        packed_float_to_f32((w >> 22) & 0x3ff, 5),
-                        1.0,
-                    ],
-                );
-            }
-            Plain::R9G9B9E5 => {
-                let w = read_le(unit);
-                // A 5-bit exponent biased by 15, shared by three 9-bit fractional mantissas.
-                let scale = 2f32.powi(((w >> 27) & 0x1f) as i32 - 15 - 9);
-                store_f32(
-                    d,
-                    [
-                        (w & 0x1ff) as f32 * scale,
-                        ((w >> 9) & 0x1ff) as f32 * scale,
-                        ((w >> 18) & 0x1ff) as f32 * scale,
-                        1.0,
-                    ],
-                );
-            }
-        }
-    }
-}
-
-/// Widen `n` source channels to RGBA, replicating a single channel across the colour lanes (a
-/// grey source) and zeroing the blue lane of a two-channel one.
-fn spread<T: Copy>(n: u8, opaque: T, zero: T, v: impl Fn(usize) -> T) -> [T; 4] {
-    match n {
-        1 => [v(0), v(0), v(0), opaque],
-        2 => [v(0), v(1), zero, opaque],
-        3 => [v(0), v(1), v(2), opaque],
-        _ => [v(0), v(1), v(2), v(3)],
-    }
-}
-
-/// A 1-, 2-, 3- or 4-byte little-endian unit as a `u32`.
-fn read_le(unit: &[u8]) -> u32 {
-    let mut w = 0u32;
-    for (i, b) in unit.iter().take(4).enumerate() {
-        w |= u32::from(*b) << (8 * i);
-    }
-    w
-}
-
-/// Pull one masked channel out of `word` and rescale it to `0..=to`. Bit-exact for a mask as
-/// wide as the target (8 or 16 bits) and correctly rounded for every other width.
-fn channel(word: u32, mask: u32, to: u32) -> u32 {
-    if mask == 0 {
-        return 0;
-    }
-    let v = u64::from((word & mask) >> mask.trailing_zeros());
-    let max = ((1u64 << mask_width(mask)) - 1).max(1);
-    ((v * u64::from(to) + max / 2) / max) as u32
-}
-
-fn store_u16(d: &mut [u8], v: [u16; 4]) {
-    for (i, x) in v.iter().enumerate() {
-        d[i * 2..i * 2 + 2].copy_from_slice(&x.to_ne_bytes());
-    }
-}
-
-fn store_f32(d: &mut [u8], v: [f32; 4]) {
-    for (i, x) in v.iter().enumerate() {
-        d[i * 4..i * 4 + 4].copy_from_slice(&x.to_ne_bytes());
-    }
-}
-
-/// One unsigned packed float — the 11- and 10-bit lanes of `R11G11B10_Float` — with
-/// `mantissa_bits` of mantissa and a 5-bit exponent biased by 15. No sign bit.
-fn packed_float_to_f32(v: u32, mantissa_bits: u32) -> f32 {
-    let max = (1u32 << mantissa_bits) - 1;
-    let mantissa = v & max;
-    let exponent = v >> mantissa_bits;
-    let frac = mantissa as f32 / (max + 1) as f32;
-    if exponent == 0 {
-        // Denormal: no implicit leading 1.
-        frac * 2f32.powi(-14)
-    } else if exponent == 0x1f {
-        if mantissa == 0 {
-            f32::INFINITY
-        } else {
-            f32::NAN
-        }
-    } else {
-        (1.0 + frac) * 2f32.powi(exponent as i32 - 15)
-    }
-}
-
-/// Divide the colour channels back out of a premultiplied buffer.
-fn straighten(pixels: &mut [u8], format: PixelFormat) {
-    match format {
-        PixelFormat::Rgba8Unorm => {
-            for px in pixels.as_chunks_mut::<4>().0 {
-                let a = u32::from(px[3]);
-                if a == 0 || a == 255 {
-                    continue;
-                }
-                for c in &mut px[..3] {
-                    *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
-                }
-            }
-        }
-        PixelFormat::Rgba16Unorm => {
-            for px in pixels.as_chunks_mut::<8>().0 {
-                let a = u64::from(u16::from_ne_bytes([px[6], px[7]]));
-                if a == 0 || a == 65535 {
-                    continue;
-                }
-                for c in 0..3 {
-                    let v = u64::from(u16::from_ne_bytes([px[c * 2], px[c * 2 + 1]]));
-                    let s = ((v * 65535 + a / 2) / a).min(65535) as u16;
-                    px[c * 2..c * 2 + 2].copy_from_slice(&s.to_ne_bytes());
-                }
-            }
-        }
-        PixelFormat::Rgba32Float => {
-            for px in pixels.as_chunks_mut::<16>().0 {
-                let a = f32::from_ne_bytes([px[12], px[13], px[14], px[15]]);
-                if a <= 0.0 || a == 1.0 {
-                    continue;
-                }
-                for c in 0..3 {
-                    let b: [u8; 4] = px[c * 4..c * 4 + 4].try_into().unwrap();
-                    let s = f32::from_ne_bytes(b) / a;
-                    px[c * 4..c * 4 + 4].copy_from_slice(&s.to_ne_bytes());
-                }
-            }
-        }
-        // The only half-float source is BC6H, which has no alpha channel to have multiplied by.
-        PixelFormat::Rgba16Float => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `decode_plain` — threaded, with the byte-lane shortcut for whole-byte masks — against the
-    /// per-texel decoder it replaced, over the layouts that take the shortcut and ones that must
-    /// not. The surface is large enough to be split across threads, and the last case's source
-    /// stops short, which has to leave the same zeroed tail either way.
-    #[test]
-    fn plain_surfaces_match_the_per_texel_decoder() {
-        let texels = 600 * 700usize;
-        let src: Vec<u8> = (0..texels * 4)
-            .map(|i| (i.wrapping_mul(2_654_435_761) >> 9) as u8)
-            .collect();
-        let masked = |bytes, masks| Plain::Masked {
-            bytes,
-            masks,
-            luminance: false,
-        };
-        let cases = [
-            masked(4, [0xff_0000, 0xff00, 0xff, 0xff00_0000]), // BGRA8
-            masked(4, [0xff, 0xff00, 0xff_0000, 0xff00_0000]), // RGBA8
-            masked(4, [0xff_0000, 0xff00, 0xff, 0]),           // BGRX8
-            masked(2, [0xf800, 0x07e0, 0x001f, 0]),            // B5G6R5: not whole bytes
-            masked(4, [0x3ff, 0xffc00, 0x3ff0_0000, 0]),       // 10-bit lanes
-        ];
-        for (i, p) in cases.into_iter().enumerate() {
-            let src = &src[..texels * p.texel_bytes()];
-            let mut expected = vec![0u8; texels * 4];
-            decode_plain_texels(p, src, PixelFormat::Rgba8Unorm, &mut expected);
-            let mut out = vec![0u8; texels * 4];
-            decode_plain(p, src, PixelFormat::Rgba8Unorm, &mut out);
-            assert!(out == expected, "case {i}");
-        }
-        let p = masked(4, [0xff_0000, 0xff00, 0xff, 0xff00_0000]);
-        let short = &src[..texels * 4 - 1000];
-        let mut expected = vec![0u8; texels * 4];
-        decode_plain_texels(p, short, PixelFormat::Rgba8Unorm, &mut expected);
-        let mut out = vec![0u8; texels * 4];
-        decode_plain(p, short, PixelFormat::Rgba8Unorm, &mut out);
-        assert!(out == expected, "short source");
-    }
 }

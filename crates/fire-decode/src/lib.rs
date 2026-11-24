@@ -76,6 +76,7 @@ mod probe;
 mod psd_layers;
 mod raw;
 mod source;
+mod texture;
 mod tiff;
 
 pub(crate) use budget::{par_chunks, par_chunks_mut};
