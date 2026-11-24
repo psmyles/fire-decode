@@ -233,6 +233,41 @@ fire's fire-decode additions are in fire's `main`, so the extraction (item 3 bel
     remains is the apps' merges onto `v0.1.1`. One open decision: a fairer lease in the crate (FD8,
     item 8).
 
+14. **KTX and KTX2 - done on Windows, for `v0.2.0`** (24 November 2026), behind a new `ktx`
+    feature, off by default. Crate only: no app turns it on yet, and 3D Review's "no KTX2"
+    non-goal stands until it does.
+    - **What it reads** (`src/ktx/`, `src/texture.rs`):
+      - BCn and the plain layouts as DDS does;
+      - ETC1 / ETC2 / EAC, ASTC LDR and PVRTC1 through `texture2ddecoder`;
+      - Basis Universal (ETC1S, UASTC, UASTC HDR) through `basisu`, a pure-Rust port of the
+        reference transcoder;
+      - Zstandard and zlib supercompression;
+      - KTX (v1) big-endian files and OpenGL's row and cube padding;
+      - `KTXorientation`, always applied.
+    - **On the way:** DDS's codecs, sheet and mip chain moved to `texture.rs` byte-identically
+      (25 local DDS files hash the same). Two fixes came out of the move:
+      - block textures now expand on the thread budget's helpers: they had spawned their own
+        threads, so a decoder panic aborted 3D Review;
+      - premultiplied RGBA16F is straightened.
+    - **Premultiplied alpha:** a premultiplied sRGB KTX2 is straightened in linear light, where
+      KTX-Software multiplies.
+    - **Gates passed on Windows:**
+      - clippy on every CI set plus `ktx`;
+      - every test with all features;
+      - 31 in-memory KTX files (`tests/ktx.rs`);
+      - 35 of KTX-Software's own files (`fixtures/ktx/`, `tests/ktx_fixtures.rs`):
+        - UASTC within 0.28 of its PNG, ETC1S within 2.9;
+        - KTX and KTX2 twins bit-identical;
+      - DDS no slower (`bench/decode-formats`).
+    - **Left:**
+      - CI on the Mac (on push);
+      - the `v0.2.0` tag (`scripts/release.sh`);
+      - turning `ktx` on in an app, with a look at real files in fire when that happens.
+    - **Found on the way, not done:** `lcms2` 6.2.0, pinned here, was yanked from crates.io (6.3.0
+      followed on 18 November). Lockfiles that have it keep working; a fresh resolve (a bench
+      without its lockfile, an older checkout) fails. Moving the pin is a decoder update
+      (`scripts/update-decoders.sh lcms2`) with its own TTFP check.
+
 The gates are in `fire-decode-plan.md` §5. Each now has both halves recorded in
 [`baselines.md`](baselines.md).
 

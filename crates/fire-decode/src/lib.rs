@@ -238,7 +238,8 @@ impl PixelFormat {
 /// viewer's transport controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SheetKind {
-    /// The six faces of a cubemap, in the DDS order `+X -X +Y -Y +Z -Z`.
+    /// The six faces of a cubemap, in the order DDS and KTX share: `+X -X +Y -Y +Z -Z`. A cube
+    /// array's come layer by layer, six at a time.
     CubeFaces,
     /// The layers of a texture array.
     ArrayLayers,
@@ -278,7 +279,7 @@ pub struct SheetLayout {
 /// dropping below 1.
 ///
 /// The one halving rule the whole pipeline agrees on — what the renderer's mip builder steps
-/// through, and what a DDS stores its own levels by. It lives here, next to
+/// through, and what a DDS or KTX file stores its own levels by. It lives here, next to
 /// [`DecodedImage::source_mips`], because that field's contract is stated in terms of it and a
 /// second copy in the viewer crate would be a rule in two places.
 pub fn level_dims(w: u32, h: u32, level: u32) -> (u32, u32) {
@@ -314,17 +315,18 @@ pub struct DecodedImage {
     /// halving rule the viewer's own mip builder uses, so a chain that survives to the worker can
     /// be adopted verbatim instead of rebuilt.
     ///
-    /// Only DDS supplies one today, and it is the format where it matters: the levels in a `.dds`
-    /// are *authored*, often with a filter and a gamma the box filter does not reproduce, and an
-    /// artist opening one wants to see what shipped rather than what we would have computed.
+    /// Only the texture containers supply one — DDS, and KTX / KTX2 — and they are the formats
+    /// where it matters: their levels are *authored*, often with a filter and a gamma the box
+    /// filter does not reproduce, and an artist opening one wants to see what shipped rather than
+    /// what we would have computed.
     ///
     /// May be **partial** (a file is free to stop its chain at 4x4) or absent. It is dropped the
     /// moment anything rewrites `pixels` — see [`transform_buffers`](Self::transform_buffers) —
     /// because a chain that no longer describes the canvas is worse than no chain at all.
     pub source_mips: Option<Vec<Vec<u8>>>,
     /// When the canvas is several surfaces tiled into a grid — a cubemap's faces, an array's
-    /// layers, a volume's slices — how to read it back. Only DDS sets it, and only with
-    /// [`Surfaces::Sheet`]. `None` for the ordinary single-surface case, which is every other
+    /// layers, a volume's slices — how to read it back. Only DDS and KTX / KTX2 set it, and only
+    /// with [`Surfaces::Sheet`]. `None` for the ordinary single-surface case, which is every other
     /// format.
     ///
     /// Unlike a detected sprite-sheet grid this is *authored*: the file says how many surfaces it
@@ -380,7 +382,7 @@ impl DecodedImage {
         // alongside would be wrong as often as right — a nearest-neighbour downscale in
         // particular does not produce the file's level 1 — so the chain is dropped and the worker
         // rebuilds one. Orientation 1, no ICC profile and an in-budget image never reach here,
-        // which is every ordinary DDS.
+        // which is every ordinary DDS or KTX.
         self.source_mips = None;
         f(&mut self.pixels);
         if let Some(anim) = self.animation.as_mut() {

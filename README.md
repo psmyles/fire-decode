@@ -18,6 +18,7 @@ Rust crate that turns the bytes of an image file into pixels, fast, on Windows a
 | PNG, JPEG, BMP, TIFF, TGA, GIF, ICO / CUR, WebP, QOI, PNM (PPM, PGM, PBM, PAM, PFM), farbfeld, JPEG XL | 8 or 16-bit, as stored. GIF keeps every frame. EXIF orientation applied where the setup asks |
 | OpenEXR, Radiance HDR | Half or 32-bit float, linear |
 | DDS | BC1-BC7 (BC6H included) and the uncompressed layouts; cubemaps, arrays, volumes and stored mips |
+| KTX, KTX2 | As DDS, plus ETC1 / ETC2 / EAC, ASTC, PVRTC and Basis Universal (ETC1S, UASTC, UASTC HDR), Zstandard and zlib supercompression, and `KTXorientation` (feature `ktx`) |
 | PSD | The merged image, 8, 16 or 32-bit, through a hardened psd_sdk (feature `psd`); its layers one at a time through `PsdLayers` |
 | HEIF, HEIC, AVIF | Through libheif, libde265 and dav1d (feature `heif`): grids, `irot` / `imir`, 10 and 12-bit, PQ / HLG, Apple and ISO gain maps, image sequences |
 | Camera raw | The embedded JPEG preview (feature `raw`) |
@@ -45,6 +46,7 @@ fire-decode = { git = "https://github.com/psmyles/fire-decode", tag = "vX.Y.Z", 
 | `heif` | HEIF, HEIC and AVIF, through the vendored libheif, libde265 and dav1d |
 | `icc` | ICC and nclx colour conversion to sRGB, through Little-CMS |
 | `raw` | Camera raw previews |
+| `ktx` | KTX and KTX2, through `ktx2`, `texture2ddecoder` and `basisu` (all pure Rust) |
 | `mips` | `fire_decode::mips`, the mip-chain builder Fire and 3D Review upload textures with |
 | `allow-abort` | Accept `panic = "abort"`, under which the panic guard can't work |
 
@@ -123,16 +125,17 @@ crates/fire-decode/   the crate: routing, setups, colour, HDR, the area filter, 
 crates/psd-sdk-sys/   the psd_sdk bridge (C++), with fire-decode's hardening patches
 crates/heif-sys/      the libheif bridge (C++ wrapper, versioned ABI) and the vendored libraries
 fixtures/heif/        44 generated HEIF / AVIF test files and what a decoder must return
+fixtures/ktx/         35 KTX / KTX2 files from KTX-Software's test resources, and fetch.sh
 bench/                decode-formats (per-format timing), bite-import, png-to-exr
 docs/                 the work plan, baselines and decoder notes
 ```
 
-**Tests.** CI runs on macOS and Windows: `cargo fmt`, clippy on four feature sets, and the tests
-on five. The sets are none, `psd` (tests only), `psd,heif`, `psd,heif,mips` and
-`psd,heif,icc,raw,mips`. Locally:
+**Tests.** CI runs on macOS and Windows: `cargo fmt`, clippy on five feature sets, and the tests
+on six. The sets are none, `psd` (tests only), `psd,heif`, `psd,heif,mips`,
+`psd,heif,icc,raw,mips` and `ktx`. Locally:
 
 ```sh
-cargo test -p fire-decode --features psd,heif,icc,raw,mips
+cargo test -p fire-decode --features psd,heif,icc,raw,mips,ktx
 cargo test -p psd-sdk-sys
 ```
 

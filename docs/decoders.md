@@ -21,7 +21,11 @@ From `Cargo.lock`; "latest" is crates.io's newest stable release.
 | `image-webp` | lossless WebP | 0.2.4 | same | |
 | `libwebp-sys` | lossy WebP (libwebp, below) | 0.14.4 | same | |
 | `ddsfile`, `bcdec_rs` | DDS header, BC1-BC7 blocks | 0.6.0, 0.2.1 | same | Updated: bcdec_rs 0.2.0 → 0.2.1 |
-| `lcms2`, `lcms2-sys` | ICC conversion (Little-CMS, below) | 6.2.0, 4.0.7 | same | Updated from 6.1.1, 4.0.6 |
+| `ktx2` | KTX2 header, level index, data format descriptor (feature `ktx`) | 0.5.0 | same | Added 24 November 2026 |
+| `texture2ddecoder` | ETC1 / ETC2 / EAC, ASTC LDR, PVRTC1 blocks (feature `ktx`) | 0.1.2 | same | Added 24 November 2026. Needs its default `alloc`: 0.1.2 doesn't build without it |
+| `basisu` | Basis Universal: ETC1S, UASTC, UASTC HDR (feature `ktx`) | 0.1.0 | same | Added 24 November 2026: its only release (July 2026), held to KTX-Software's files by `tests/ktx_fixtures.rs` |
+| `ruzstd` | Zstandard-supercompressed KTX2 levels (feature `ktx`) | 0.7.3 | 0.9.1 | Stays on 0.7: `basisu` asks for ^0.7, and one copy links |
+| `lcms2`, `lcms2-sys` | ICC conversion (Little-CMS, below) | 6.2.0, 4.0.7 | 6.3.0 | 6.2.0 was yanked; see PLAN.md, item 14 |
 | `miniz_oxide` | zlib for PSD layer channels | 0.8.9 | 0.9.1 | Stays: `exr` and `png` use 0.8 too |
 | `flate2` | deflate in TIFF and PNG (through `tiff`, `png`) | 1.1.11 | same | Updated from 1.1.9 |
 

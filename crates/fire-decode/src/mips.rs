@@ -11,8 +11,8 @@
 //!   are averaged, as for a `UNORM` one: 3D Review's data textures and its Tex viewport.
 //! - **Alpha, and the 16-bit and float formats, are averaged as stored.** Integer samples round
 //!   to nearest exactly, ties up.
-//! - **A file's own chain is kept** ([`complete`]): a DDS's authored levels are adopted and only
-//!   the tail it stopped short of is computed.
+//! - **A file's own chain is kept** ([`complete`]): a DDS's or KTX's authored levels are adopted
+//!   and only the tail it stopped short of is computed.
 //! - **The big levels are split across threads** from the process-wide budget (FD8), so a chain
 //!   built while decodes run takes only what they leave free.
 //!

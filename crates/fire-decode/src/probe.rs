@@ -1,8 +1,8 @@
 //! `probe()` (FD19): a file's size and format, read from its headers without decoding pixels.
 //!
 //! The size is what [`decode`](crate::decode) returns with
-//! [`DecodeOptions::inspect`](crate::DecodeOptions::inspect): EXIF orientation off, no fit, a DDS
-//! file's whole sheet. HEIF's own `irot` / `clap` are part of the image and are applied, as decode
+//! [`DecodeOptions::inspect`](crate::DecodeOptions::inspect): EXIF orientation off, no fit, a
+//! texture's whole sheet (DDS, KTX, KTX2). HEIF's own `irot` / `clap` are part of the image and are applied, as decode
 //! applies them. Each format is read the cheapest exact way: most from a few bytes of header, JPEG
 //! and HEIF by walking their markers and boxes with seeks (HEIF's `meta` box can follow `mdat`),
 //! TIFF, EXR and the `image` crate's formats through their own lazy header readers. Two read the

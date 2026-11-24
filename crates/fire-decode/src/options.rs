@@ -90,7 +90,8 @@ pub enum Frames {
     First,
 }
 
-/// What a DDS file's array layers, cube faces or volume slices come back as (FD5).
+/// What a texture's array layers, cube faces or volume slices come back as (FD5): a DDS, KTX or
+/// KTX2 file's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surfaces {
     /// All of them, tiled into one sheet described by
@@ -111,15 +112,15 @@ pub struct DecodeOptions {
     #[cfg(feature = "icc")]
     pub honor_icc: bool,
     /// Rotate by the EXIF `Orientation` tag (and a camera raw's preview orientation). HEIF's own
-    /// `irot` / `imir` / `clap` and JPEG XL's header orientation are part of the image, and are
-    /// always applied.
+    /// `irot` / `imir` / `clap`, JPEG XL's header orientation and KTX's `KTXorientation` are part
+    /// of the image, and are always applied.
     pub honor_exif: bool,
     pub output: Output,
     pub hdr: Hdr,
     pub fit: Option<Fit>,
     pub frames: Frames,
     pub surfaces: Surfaces,
-    /// Keep a DDS file's own mip chain in
+    /// Keep a DDS, KTX or KTX2 file's own mip chain in
     /// [`DecodedImage::source_mips`](crate::DecodedImage::source_mips).
     pub stored_mips: bool,
     pub limits: Limits,
@@ -129,7 +130,7 @@ pub struct DecodeOptions {
 }
 
 impl DecodeOptions {
-    /// fire's viewer: colour-managed and upright, every animation frame and DDS surface, the
+    /// fire's viewer: colour-managed and upright, every animation frame and texture surface, the
     /// file's own mips, shrunk only past 16384 px (a RAM guard).
     pub fn viewer() -> Self {
         Self {
@@ -151,8 +152,8 @@ impl DecodeOptions {
     }
 
     /// fire-cli (Asset Check): the file as stored, at full size, with no colour conversion and no
-    /// EXIF rotation, so it reports the size Unity imports. A DDS file's whole sheet, so its
-    /// surfaces can be counted from `layout`.
+    /// EXIF rotation, so it reports the size Unity imports. A texture's whole sheet (DDS, KTX,
+    /// KTX2), so its surfaces can be counted from `layout`.
     pub fn inspect() -> Self {
         Self {
             #[cfg(feature = "icc")]

@@ -8,7 +8,8 @@ use crate::Format;
 pub struct SourceInfo {
     pub format: Format,
     /// The name for a status bar, more specific than [`Format::name`] where the file says more:
-    /// `Nikon NEF`, a DDS file's pixel format (`DDS BC7 sRGB`), `PPM` for every Netpbm file.
+    /// `Nikon NEF`, a texture's pixel format (`DDS BC7`, `KTX2 ETC1S`), `PPM` for every Netpbm
+    /// file.
     pub name: &'static str,
     /// The channels the pixels carry: 1 grey, 2 grey + alpha, 3 colour, 4 colour + alpha. A CMYK
     /// JPEG is 3, and a PSD's extra channels beyond its transparency don't count. Reported
