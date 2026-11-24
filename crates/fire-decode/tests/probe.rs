@@ -191,6 +191,38 @@ fn ktx2(w: u32, h: u32, layers: u32, faces: u32) -> Vec<u8> {
     out
 }
 
+/// A KTX (v1) of one `w`x`h` RGB8 level, `faces` faces (a lone cubemap when 6), rows padded to
+/// 4 bytes as the format stores them.
+fn ktx1(w: u32, h: u32, faces: u32) -> Vec<u8> {
+    let row = (w * 3).next_multiple_of(4) as usize;
+    let face = row * h as usize;
+    let mut out = vec![
+        0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+    ];
+    // Endianness, glType UNSIGNED_BYTE, glTypeSize, glFormat RGB, glInternalFormat RGB8,
+    // glBaseInternalFormat, size, depth, array elements, faces, levels, key/value bytes.
+    for v in [
+        0x0403_0201,
+        0x1401,
+        1,
+        0x1907,
+        0x8051,
+        0x1907,
+        w,
+        h,
+        0,
+        0,
+        faces,
+        1,
+        0,
+    ] {
+        out.extend_from_slice(&u32::to_le_bytes(v));
+    }
+    out.extend_from_slice(&(face as u32).to_le_bytes());
+    out.extend((0..face * faces as usize).map(|i| i as u8));
+    out
+}
+
 /// A raw 8-bit RGB PSD with a merged image.
 fn psd(w: u32, h: u32) -> Vec<u8> {
     let mut b = b"8BPS".to_vec();
@@ -238,6 +270,8 @@ fn generated() -> Vec<(String, Vec<u8>, &'static str)> {
         ("dds".into(), dds(8, 4, None, false), "dds"),
         ("dds cubemap".into(), dds(4, 4, Some(6), true), "dds"),
         ("dds array".into(), dds(4, 4, Some(3), false), "dds"),
+        ("ktx".into(), ktx1(5, 3, 1), "ktx"),
+        ("ktx cubemap".into(), ktx1(4, 4, 6), "ktx"),
         ("ktx2".into(), ktx2(8, 4, 0, 1), "ktx2"),
         ("ktx2 cubemap".into(), ktx2(4, 4, 0, 6), "ktx2"),
         ("ktx2 array".into(), ktx2(4, 2, 3, 1), "ktx2"),
@@ -283,7 +317,7 @@ fn every_generated_format_probes_as_it_decodes() {
     }
     for (name, format) in &seen {
         let compiled_out = (name == "psd" && !cfg!(feature = "psd"))
-            || (name.starts_with("ktx2") && !cfg!(feature = "ktx"));
+            || (name.starts_with("ktx") && !cfg!(feature = "ktx"));
         assert!(
             format.is_some() || compiled_out,
             "{name} didn't decode, so probe wasn't checked"

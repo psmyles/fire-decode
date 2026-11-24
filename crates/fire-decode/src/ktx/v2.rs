@@ -12,27 +12,9 @@ use std::io::Read;
 
 use ktx2::{Header, Reader, SupercompressionScheme};
 
-use super::{Container, Orientation, describe_vk, from_vk, image, layout, vk};
+use super::{Container, Dims, Orientation, describe_vk, from_vk, image, vk};
 use crate::texture::{self, Format, Shape, decode_surface};
-use crate::{Cx, DecodeError, DecodedImage, SheetLayout, level_dims};
-
-/// The shape a KTX2 header gives, with its zeros made ones.
-pub(super) struct Dims {
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) depth: u32,
-    pub(super) layers: u32,
-    pub(super) faces: u32,
-    /// The levels stored, at least 1 and never more than the dimensions can halve to.
-    pub(super) levels: u32,
-}
-
-impl Dims {
-    /// How the surfaces tile into a sheet, or `None` for one surface.
-    pub(super) fn layout(&self) -> Option<SheetLayout> {
-        layout(self.depth, self.layers, self.faces)
-    }
-}
+use crate::{Cx, DecodeError, DecodedImage, level_dims};
 
 fn malformed(what: impl std::fmt::Display) -> DecodeError {
     DecodeError::Malformed(format!("KTX2: {what}"))
@@ -47,34 +29,17 @@ pub(super) fn header(bytes: &[u8]) -> Result<Header, DecodeError> {
     Header::from_bytes(head).map_err(malformed)
 }
 
-/// The header's shape, checked for what KTX2 allows: one or six faces, square cubemap faces with
-/// no depth, and no arrays of volumes (which Vulkan has no image type for either).
+/// The header's shape, checked as [`Dims::new`] checks it.
 pub(super) fn dims(h: &Header) -> Result<Dims, DecodeError> {
-    let (width, height, depth) = (h.pixel_width, h.pixel_height.max(1), h.pixel_depth.max(1));
-    let (layers, faces) = (h.layer_count.max(1), h.face_count);
-    if faces != 1 && faces != 6 {
-        return Err(malformed(format_args!("a texture with {faces} faces")));
-    }
-    if faces == 6 && (width != height || depth > 1) {
-        return Err(malformed(format_args!(
-            "a {width}x{height}x{depth} cubemap; its faces must be square and flat"
-        )));
-    }
-    if depth > 1 && layers > 1 {
-        return Err(malformed("an array of volume textures"));
-    }
-    // A header may claim more levels than the dimensions can have, and a corrupt one may claim
-    // billions. Either way the chain stops where the halving reaches 1x1x1.
-    let max_levels = 32 - width.max(height).max(depth).leading_zeros();
-    let levels = h.level_count.clamp(1, max_levels);
-    Ok(Dims {
-        width,
-        height,
-        depth,
-        layers,
-        faces,
-        levels,
-    })
+    Dims::new(
+        Container::V2,
+        h.pixel_width,
+        h.pixel_height,
+        h.pixel_depth,
+        h.layer_count,
+        h.face_count,
+        h.level_count,
+    )
 }
 
 /// Whether `vk` is one of the two ASTC HDR formats Basis Universal's transcoder reads: 4x4, as
@@ -229,12 +194,7 @@ impl<'a> Levels<'a> {
         cx: &Cx,
     ) -> Result<Self, DecodeError> {
         let stored: Vec<_> = reader.levels().take(dims.levels as usize).collect();
-        let surfaces = dims.layers.checked_mul(dims.faces).ok_or_else(|| {
-            DecodeError::TooLarge(format!(
-                "KTX2 {} layers of {} faces overflow",
-                dims.layers, dims.faces
-            ))
-        })?;
+        let surfaces = dims.surfaces(Container::V2)?;
         let expected = (0..stored.len() as u32)
             .map(|level| {
                 let (lw, lh) = level_dims(dims.width, dims.height, level);

@@ -7,6 +7,8 @@
 //!     its layers one at a time through [`PsdLayers`] (pure Rust)
 //!   - EXR            -> `exr` crate       : half or 32-bit float RGBA, as stored (linear/HDR)
 //!   - DDS            -> `ddsfile` + `bcdec_rs`: BC1-BC7 and the uncompressed layouts
+//!   - KTX / KTX2     -> `ktx` module (feature `ktx`): BCn, ETC / EAC, ASTC, PVRTC through
+//!     `texture2ddecoder`, Basis Universal through `basisu`; sheets and mips as DDS's
 //!   - HEIC/HEIF/AVIF -> libheif (C++ FFI) : 8-bit RGBA, or 16-bit RGBA for 10/12-bit (+ICC)
 //!   - camera raw     -> [`raw`] preview   : extract the embedded JPEG, decode via zune
 //!   - GIF            -> `image` crate     : every frame (animated GIF plays; see [`Animation`])
@@ -40,9 +42,10 @@
 //! pass draws on one process-wide thread budget (FD8, [`budget`]).
 //!
 //! **Cargo features** (FD13), none on by default: `psd` and `heif` need the native code in
-//! `psd-sdk-sys` / `heif-sys`; `icc` brings in lcms2; `raw` decodes camera raw. A format compiled
-//! out still routes as before and returns [`DecodeError::Unsupported`], which is what lets CI lint
-//! and test the pure-Rust core on its own. `allow-abort` is below.
+//! `psd-sdk-sys` / `heif-sys`; `icc` brings in lcms2; `raw` decodes camera raw; `ktx` decodes KTX
+//! and KTX2 (pure Rust, but four crates an app that doesn't open them needn't build). A format
+//! compiled out still routes as before and returns [`DecodeError::Unsupported`], which is what
+//! lets CI lint and test the pure-Rust core on its own. `allow-abort` is below.
 
 // The panic guard is `catch_unwind`, which does nothing when panics abort (FD7): a decode panic
 // would take the process down. So such a build is refused unless it says it knows.
@@ -482,6 +485,9 @@ enum Backend {
     /// DDS (DirectDraw Surface); the game-development texture container, decompressed on the
     /// CPU by [`crate::dds`].
     Dds,
+    /// KTX, Khronos' OpenGL-era texture container, by its 12-byte identifier; decompressed on the
+    /// CPU by `ktx::v1` (feature `ktx`).
+    Ktx,
     /// KTX2, Khronos' Vulkan-era texture container, by its 12-byte identifier; decompressed on the
     /// CPU by `ktx::v2` (feature `ktx`).
     Ktx2,
@@ -512,6 +518,7 @@ impl Backend {
             Backend::Tiff => Format::Tiff,
             Backend::Hdr => Format::RadianceHdr,
             Backend::Dds => Format::Dds,
+            Backend::Ktx => Format::Ktx,
             Backend::Ktx2 => Format::Ktx2,
             Backend::Cur => Format::Cur,
             Backend::Tga => Format::Tga,
@@ -613,9 +620,12 @@ fn route(bytes: &[u8], len: usize, ext: Option<&str>) -> Backend {
         // DXT-only decoder), so it is sniffed here and handled by our own backend.
         Backend::Dds
     } else if bytes.starts_with(&KTX2_MAGIC) {
-        // KTX2: a twelve-byte identifier nothing else starts with. Sniffed whatever this build
-        // decodes, so a build without `ktx` names it and says so, rather than handing it on.
+        // KTX2, and KTX below: twelve-byte identifiers nothing else starts with. Sniffed whatever
+        // this build decodes, so a build without `ktx` names them and says so, rather than
+        // handing them on.
         Backend::Ktx2
+    } else if bytes.starts_with(&KTX_MAGIC) {
+        Backend::Ktx
     } else if bytes.starts_with(&[0x00, 0x00, 0x02, 0x00]) {
         // Byte 2 is the ICO/CUR type word, 1 for an icon and 2 for a cursor — but a cursor is
         // not the only thing that claims this magic. An uncompressed true-colour TGA opens with
@@ -743,6 +753,7 @@ fn decode_inner(
         }
         Backend::Hdr => decode_hdr(bytes, &cx)?,
         Backend::Dds => dds::decode(bytes, &cx)?,
+        Backend::Ktx => decode_ktx(bytes, &cx)?,
         Backend::Ktx2 => decode_ktx2(bytes, &cx)?,
         Backend::Cur => decode_cur(bytes, &cx)?,
         // Sniffed from its header, so it needs no extension hint to name itself.
@@ -1483,6 +1494,18 @@ fn decode_raw(bytes: &[u8], label: &'static str, cx: &Cx) -> Result<DecodedImage
     Ok(img)
 }
 
+/// KTX (feature `ktx`).
+#[cfg(feature = "ktx")]
+fn decode_ktx(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    ktx::v1::decode(bytes, cx)
+}
+
+/// Stand-in for [`decode_ktx`] in a build without `ktx`.
+#[cfg(not(feature = "ktx"))]
+fn decode_ktx(_bytes: &[u8], _cx: &Cx) -> Result<DecodedImage, DecodeError> {
+    Err(DecodeError::Unsupported(Format::Ktx))
+}
+
 /// KTX2 (feature `ktx`).
 #[cfg(feature = "ktx")]
 fn decode_ktx2(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
@@ -1494,6 +1517,11 @@ fn decode_ktx2(bytes: &[u8], cx: &Cx) -> Result<DecodedImage, DecodeError> {
 fn decode_ktx2(_bytes: &[u8], _cx: &Cx) -> Result<DecodedImage, DecodeError> {
     Err(DecodeError::Unsupported(Format::Ktx2))
 }
+
+/// KTX's file identifier: `«KTX 11»`, CR, LF, SUB, LF.
+const KTX_MAGIC: [u8; 12] = [
+    0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+];
 
 /// KTX2's file identifier: `«KTX 20»`, CR, LF, SUB, LF.
 const KTX2_MAGIC: [u8; 12] = [

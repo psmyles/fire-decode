@@ -70,6 +70,7 @@ fn probe_inner<R: Read + Seek>(r: &mut R, ext: Option<&str>) -> Result<Probe, De
         }
         Backend::Raw(_) => raw_dims(r)?,
         Backend::Dds => crate::dds::probe_dims(&head, len as usize)?,
+        Backend::Ktx => ktx_dims(&head)?,
         Backend::Ktx2 => ktx2_dims(&head)?,
         Backend::Tiff => {
             let mut d = tiff::decoder::Decoder::new(BufReader::new(r)).map_err(malformed)?;
@@ -259,8 +260,19 @@ fn raw_dims<R: Read + Seek>(_r: &mut R) -> Result<(u32, u32), DecodeError> {
     Err(DecodeError::Unsupported(Format::CameraRaw))
 }
 
-/// A KTX2's size from its 80-byte header: one surface, or the sheet its layers, faces or slices
+/// A KTX's size from its 64-byte header: one surface, or the sheet its layers, faces or slices
 /// tile into.
+#[cfg(feature = "ktx")]
+fn ktx_dims(head: &[u8]) -> Result<(u32, u32), DecodeError> {
+    crate::ktx::v1::probe_dims(head)
+}
+
+#[cfg(not(feature = "ktx"))]
+fn ktx_dims(_head: &[u8]) -> Result<(u32, u32), DecodeError> {
+    Err(DecodeError::Unsupported(Format::Ktx))
+}
+
+/// A KTX2's size from its 80-byte header, the same way.
 #[cfg(feature = "ktx")]
 fn ktx2_dims(head: &[u8]) -> Result<(u32, u32), DecodeError> {
     crate::ktx::v2::probe_dims(head)

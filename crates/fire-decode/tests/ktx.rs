@@ -907,3 +907,335 @@ fn premultiplied_alpha_is_straightened() {
         [90, 47, 0, 128]
     );
 }
+
+// --- KTX (v1) ------------------------------------------------------------------------------
+
+const GL_UNSIGNED_BYTE: u32 = 0x1401;
+const GL_UNSIGNED_SHORT: u32 = 0x1403;
+const GL_BYTE: u32 = 0x1400;
+const GL_FLOAT: u32 = 0x1406;
+const GL_UNSIGNED_SHORT_5_6_5: u32 = 0x8363;
+const GL_RED: u32 = 0x1903;
+const GL_RGB: u32 = 0x1907;
+const GL_RGBA: u32 = 0x1908;
+const GL_ALPHA: u32 = 0x1906;
+const GL_LUMINANCE: u32 = 0x1909;
+const GL_LUMINANCE_ALPHA: u32 = 0x190A;
+const GL_COMPRESSED_RGBA_S3TC_DXT1: u32 = 0x83F1;
+const GL_ETC1_RGB8_OES: u32 = 0x8D64;
+
+/// A KTX file, field by field. Each level is its `imageSize` and the bytes that follow it, laid
+/// out by the test (row and cube padding included); the builder adds only the `mipPadding`.
+/// `big_endian` writes every header field, `imageSize` and key/value length the other way round;
+/// texel data is the test's to swap.
+#[derive(Clone)]
+struct Ktx1 {
+    big_endian: bool,
+    gl_type: u32,
+    gl_type_size: u32,
+    gl_format: u32,
+    gl_internal_format: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
+    elements: u32,
+    faces: u32,
+    levels: Vec<(u32, Vec<u8>)>,
+    kvd: Vec<(&'static [u8], &'static [u8])>,
+}
+
+impl Ktx1 {
+    /// Uncompressed: `format` and `ty`, with `type_size` bytes a swap unit.
+    fn plain(format: u32, ty: u32, type_size: u32, w: u32, h: u32, level0: Vec<u8>) -> Self {
+        Ktx1 {
+            big_endian: false,
+            gl_type: ty,
+            gl_type_size: type_size,
+            gl_format: format,
+            gl_internal_format: 0,
+            width: w,
+            height: h,
+            depth: 0,
+            elements: 0,
+            faces: 1,
+            levels: vec![(level0.len() as u32, level0)],
+            kvd: Vec::new(),
+        }
+    }
+
+    /// Block-compressed: `glInternalFormat` names it, `glType` and `glFormat` are 0.
+    fn compressed(internal: u32, w: u32, h: u32, level0: Vec<u8>) -> Self {
+        Ktx1 {
+            gl_internal_format: internal,
+            ..Ktx1::plain(0, 0, 1, w, h, level0)
+        }
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        let u32b = |v: u32| {
+            if self.big_endian {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let mut kvd = Vec::new();
+        for (k, v) in &self.kvd {
+            kvd.extend_from_slice(&u32b((k.len() + v.len()) as u32));
+            kvd.extend_from_slice(k);
+            kvd.extend_from_slice(v);
+            while !kvd.len().is_multiple_of(4) {
+                kvd.push(0);
+            }
+        }
+        let mut out = vec![
+            0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+        ];
+        for v in [
+            0x0403_0201,
+            self.gl_type,
+            self.gl_type_size,
+            self.gl_format,
+            self.gl_internal_format,
+            self.gl_format,
+            self.width,
+            self.height,
+            self.depth,
+            self.elements,
+            self.faces,
+            self.levels.len() as u32,
+            kvd.len() as u32,
+        ] {
+            out.extend_from_slice(&u32b(v));
+        }
+        out.extend_from_slice(&kvd);
+        for (size, data) in &self.levels {
+            out.extend_from_slice(&u32b(*size));
+            out.extend_from_slice(data);
+            while !out.len().is_multiple_of(4) {
+                out.push(0);
+            }
+        }
+        out
+    }
+}
+
+/// A NUL-terminated key or value, for `Ktx1::kvd`.
+fn z(s: &'static str) -> &'static [u8] {
+    s.as_bytes()
+}
+
+/// KTX's identifier routes it, and probe reads the 64-byte header alone.
+#[test]
+fn ktx_routes_by_its_identifier() {
+    let file = Ktx1::plain(GL_RGBA, GL_UNSIGNED_BYTE, 1, 2, 2, ramp(2, 2)).bytes();
+    assert_eq!(sniff(&file, None), Format::Ktx);
+    let img = decode(&file, Some("png"), &opts()).expect("KTX");
+    assert_eq!(
+        (img.source.format, img.source.name),
+        (Format::Ktx, "KTX RGBA8")
+    );
+    assert_eq!(rgba8(&img, 3), [3, 0, 7, 255]);
+    let p = probe(std::io::Cursor::new(&file[..64]), None).expect("probes");
+    assert_eq!((p.width, p.height, p.format), (2, 2, Format::Ktx));
+}
+
+/// An uncompressed row is padded to 4 bytes: a 5-texel RGB8 row is 15 bytes stored in 16. A
+/// level whose `imageSize` is exactly the unpadded size is read unpadded.
+#[test]
+fn ktx_rows_are_padded_to_four_bytes() {
+    let texel = |x: u8, y: u8| [x * 10, y * 10, 1];
+    let level = |pad: bool| {
+        let mut l = Vec::new();
+        for y in 0..3 {
+            for x in 0..5 {
+                l.extend_from_slice(&texel(x, y));
+            }
+            if pad {
+                l.push(0xEE);
+            }
+        }
+        l
+    };
+    for pad in [true, false] {
+        let file = Ktx1::plain(GL_RGB, GL_UNSIGNED_BYTE, 1, 5, 3, level(pad)).bytes();
+        let img = decode(&file, None, &opts()).unwrap_or_else(|e| panic!("pad {pad}: {e}"));
+        assert_eq!(img.source.name, "KTX RGB8");
+        for y in 0..3u8 {
+            for x in 0..5u8 {
+                let [r, g, b] = texel(x, y);
+                let i = usize::from(y * 5 + x);
+                assert_eq!(rgba8(&img, i), [r, g, b, 255], "pad {pad}, {x},{y}");
+            }
+        }
+    }
+}
+
+/// Luminance, luminance-alpha and alpha, which Vulkan has no spelling for; and a packed type,
+/// read most significant bits first as GL defines it.
+#[test]
+fn ktx_luminance_alpha_and_packed_types() {
+    let one = |format: u32, data: Vec<u8>| {
+        decode(
+            &Ktx1::plain(format, GL_UNSIGNED_BYTE, 1, 1, 1, data).bytes(),
+            None,
+            &opts(),
+        )
+        .expect("decodes")
+    };
+    let l = one(GL_LUMINANCE, vec![77, 0, 0, 0]);
+    assert_eq!((rgba8(&l, 0), l.source.channels), ([77, 77, 77, 255], 1));
+    let la = one(GL_LUMINANCE_ALPHA, vec![77, 99, 0, 0]);
+    assert_eq!((rgba8(&la, 0), la.source.channels), ([77, 77, 77, 99], 2));
+    let a = one(GL_ALPHA, vec![99, 0, 0, 0]);
+    assert_eq!(rgba8(&a, 0)[3], 99);
+
+    let data = [0xf800u16, 0x001f]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let rgb565 = Ktx1::plain(GL_RGB, GL_UNSIGNED_SHORT_5_6_5, 2, 2, 1, data);
+    let img = decode(&rgb565.bytes(), None, &opts()).expect("RGB565");
+    assert_eq!(
+        (rgba8(&img, 0), rgba8(&img, 1)),
+        ([255, 0, 0, 255], [0, 0, 255, 255])
+    );
+}
+
+/// A file written big-endian decodes like its little-endian twin: the header and `imageSize`
+/// swapped, and the texels in `glTypeSize` units — 2 for 16-bit channels, 4 for floats, and
+/// none for block-compressed data.
+#[test]
+fn a_big_endian_ktx_matches_its_little_endian_twin() {
+    let swapped = |data: &[u8], unit: usize| -> Vec<u8> {
+        data.chunks(unit)
+            .flat_map(|u| u.iter().rev().copied())
+            .collect()
+    };
+    let rgba16: Vec<u8> = [1000u16, 20000, 30000, 65535, 5, 6, 7, 8]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let f32s: Vec<u8> = [0.25f32, 2.0, -1.0, 1.0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let bc1 = bc1_solid(0x07e0).to_vec();
+    for (le, unit) in [
+        (Ktx1::plain(GL_RGBA, GL_UNSIGNED_SHORT, 2, 2, 1, rgba16), 2),
+        (Ktx1::plain(GL_RGBA, GL_FLOAT, 4, 1, 1, f32s), 4),
+        (Ktx1::compressed(GL_COMPRESSED_RGBA_S3TC_DXT1, 4, 4, bc1), 1),
+    ] {
+        let reference = decode(&le.bytes(), None, &opts()).expect("little-endian");
+        let mut be = le.clone();
+        be.big_endian = true;
+        be.levels[0].1 = swapped(&le.levels[0].1, unit);
+        let img = decode(&be.bytes(), None, &opts()).expect("big-endian");
+        assert_eq!(img.pixels, reference.pixels, "{}", reference.source.name);
+        assert_eq!(img.source.name, reference.source.name);
+    }
+
+    let mut bad = Ktx1::plain(GL_RGBA, GL_UNSIGNED_BYTE, 1, 1, 1, vec![0; 4]).bytes();
+    bad[12..16].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    assert!(malformed(decode(&bad, None, &opts())).contains("endianness"));
+}
+
+/// `KTXorientation` is found past a key/value entry of odd length (its padding skipped), and
+/// `S=r,T=u` turns the rows over.
+#[test]
+fn ktx_orientation_is_found_and_applied() {
+    let mut k = Ktx1::plain(
+        GL_RED,
+        GL_UNSIGNED_BYTE,
+        1,
+        1,
+        2,
+        vec![1, 0, 0, 0, 2, 0, 0, 0],
+    );
+    k.kvd = vec![
+        (z("KTXwriter\0"), z("a tool\0")),
+        (z("KTXorientation\0"), z("S=r,T=u\0")),
+    ];
+    let img = decode(&k.bytes(), None, &opts()).expect("bottom-up");
+    assert_eq!((rgba8(&img, 0)[0], rgba8(&img, 1)[0]), (2, 1));
+    k.kvd = vec![(z("KTXorientation\0"), z("S=r,T=d\0"))];
+    let img = decode(&k.bytes(), None, &opts()).expect("top-down");
+    assert_eq!((rgba8(&img, 0)[0], rgba8(&img, 1)[0]), (1, 2));
+}
+
+/// A cubemap that isn't an array gives `imageSize` per face and pads each face to 4 bytes; a
+/// cube array gives it for the whole level. Both come out as the same six faces.
+#[test]
+fn ktx_lone_cubemap_and_cube_array_layouts() {
+    // 1x1 R8 faces stored unpadded: one byte each, then three of cube padding.
+    let mut lone = Ktx1::plain(GL_RED, GL_UNSIGNED_BYTE, 1, 1, 1, Vec::new());
+    lone.faces = 6;
+    lone.levels = vec![(1, (0..6u8).flat_map(|f| [f * 40, 0, 0, 0]).collect())];
+    let img = decode(&lone.bytes(), None, &opts()).expect("lone cubemap");
+    let l = img.layout.unwrap();
+    assert_eq!((l.frames, l.kind), (6, SheetKind::CubeFaces));
+    let faces: Vec<u8> = (0..6).map(|i| rgba8(&img, i)[0]).collect();
+    assert_eq!(faces, [0, 40, 80, 120, 160, 200]);
+
+    // The same faces as a one-element cube array: 4-byte padded rows, the level's size once.
+    let mut array = lone.clone();
+    array.elements = 1;
+    array.levels = vec![(24, (0..6u8).flat_map(|f| [f * 40, 0, 0, 0]).collect())];
+    let img = decode(&array.bytes(), None, &opts()).expect("cube array");
+    let faces: Vec<u8> = (0..6).map(|i| rgba8(&img, i)[0]).collect();
+    assert_eq!(faces, [0, 40, 80, 120, 160, 200]);
+}
+
+/// ETC1 has a GL name of its own, and a signed or integer type has no display mapping: refused
+/// with all three GL values named.
+#[test]
+fn ktx_formats_by_their_gl_names() {
+    let etc1 = Ktx1::compressed(GL_ETC1_RGB8_OES, 4, 4, etc_solid(15, 0, 0).to_vec());
+    let img = decode(&etc1.bytes(), None, &opts()).expect("ETC1");
+    assert_eq!(img.source.name, "KTX ETC1");
+    assert_eq!(rgba8(&img, 0), [255, 2, 2, 255]);
+
+    let signed = Ktx1::plain(GL_RGBA, GL_BYTE, 1, 1, 1, vec![0; 4]);
+    let m = malformed(decode(&signed.bytes(), None, &opts()));
+    assert!(m.contains("glType 0x1400"), "{m}");
+}
+
+/// Mips are each preceded by their own `imageSize`; a level missing from the end of the file ends
+/// the chain, and a missing or short level 0 is an error. The header's claim is guarded first.
+#[test]
+fn ktx_levels_and_guards() {
+    let mut k = Ktx1::plain(GL_RGBA, GL_UNSIGNED_BYTE, 1, 2, 2, ramp(2, 2));
+    k.levels.push((4, vec![9, 9, 9, 255]));
+    let img = decode(&k.bytes(), None, &opts()).expect("two levels");
+    assert_eq!(img.source_mips.unwrap()[0], [9, 9, 9, 255]);
+
+    // The header says two levels; the file holds one.
+    let mut file = k.bytes();
+    file.truncate(file.len() - 8);
+    assert!(decode(&file, None, &opts()).unwrap().source_mips.is_none());
+    // And none at all.
+    let m = malformed(decode(&file[..64], None, &opts()));
+    assert!(m.contains("level 0 is missing"), "{m}");
+    // An `imageSize` far past the end of the file.
+    let mut huge = Ktx1::plain(GL_RGBA, GL_UNSIGNED_BYTE, 1, 2, 2, ramp(2, 2));
+    huge.levels[0].0 = u32::MAX;
+    malformed(decode(&huge.bytes(), None, &opts()));
+
+    let lim = DecodeOptions {
+        limits: Limits {
+            max_dim: 1 << 16,
+            max_bytes: 1 << 30,
+        },
+        ..opts()
+    };
+    let bomb = Ktx1::plain(GL_RGBA, GL_UNSIGNED_BYTE, 1, 100_000, 100_000, vec![0; 4]);
+    assert!(too_large(decode(&bomb.bytes(), None, &lim)).contains("KTX"));
+
+    // Every prefix of a valid file is an error or a decode, never a panic.
+    k.kvd = vec![(z("KTXorientation\0"), z("S=r,T=u\0"))];
+    let file = k.bytes();
+    for n in 0..file.len() {
+        let _ = decode(&file[..n], None, &opts());
+        let _ = probe(std::io::Cursor::new(&file[..n]), None);
+    }
+}

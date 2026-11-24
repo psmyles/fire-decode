@@ -476,16 +476,21 @@ fn a_compiled_out_format_is_unsupported() {
     }
     // KTX2's identifier and a header: named whatever the build, and refused without `ktx` with a
     // message that says which feature reads it.
-    let mut ktx2 = b"\xABKTX 20\xBB\r\n\x1A\n".to_vec();
-    ktx2.resize(80, 0);
-    assert_eq!(sniff(&ktx2, None), Format::Ktx2);
-    let r = decode(&ktx2, None, &DecodeOptions::viewer());
-    if cfg!(feature = "ktx") {
-        assert!(!matches!(r, Err(DecodeError::Unsupported(_))));
-    } else {
-        let e = r.expect_err("compiled out");
-        assert!(matches!(e, DecodeError::Unsupported(Format::Ktx2)));
-        assert!(e.to_string().contains("\"ktx\" feature"), "{e}");
+    for (magic, format) in [
+        (b"\xABKTX 20\xBB\r\n\x1A\n", Format::Ktx2),
+        (b"\xABKTX 11\xBB\r\n\x1A\n", Format::Ktx),
+    ] {
+        let mut file = magic.to_vec();
+        file.resize(80, 0);
+        assert_eq!(sniff(&file, None), format);
+        let r = decode(&file, None, &DecodeOptions::viewer());
+        if cfg!(feature = "ktx") {
+            assert!(!matches!(r, Err(DecodeError::Unsupported(_))));
+        } else {
+            let e = r.expect_err("compiled out");
+            assert!(matches!(e, DecodeError::Unsupported(f) if f == format));
+            assert!(e.to_string().contains("\"ktx\" feature"), "{e}");
+        }
     }
 }
 

@@ -107,6 +107,125 @@ fn both_orientations_come_back_upright() {
         read("ktx2/orient_down_metadata.ktx2"),
     );
     assert!(up.pixels == down.pixels, "orient_up and orient_down differ");
+    // KTX says it as `S=r,T=u`; the RGB8 files hold the same picture as the RGBA8 KTX2 ones.
+    for name in ["ktx/orient_up_metadata.ktx", "ktx/orient_down_metadata.ktx"] {
+        assert_eq!(mae(&read(name).pixels, &up.pixels, true), 0.0, "{name}");
+    }
+}
+
+// --- KTX (v1) ------------------------------------------------------------------------------
+
+/// The same payloads in both containers decode to the same pixels: the arrays' blocks, and an
+/// RGB8 chain (with KTX's row padding) against the RGBA8 one, level by level.
+#[test]
+fn ktx_and_ktx2_agree() {
+    for name in [
+        "bc3_unorm_array_7",
+        "etc2_unorm_array_7",
+        "astc_8x8_unorm_array_7",
+    ] {
+        let (v1, v2) = (
+            read(&format!("ktx/{name}.ktx")),
+            read(&format!("ktx2/{name}.ktx2")),
+        );
+        assert_eq!(v1.layout, v2.layout, "{name}");
+        assert!(v1.pixels == v2.pixels, "{name}");
+        assert_eq!(&v1.source.name[..4], "KTX ", "{name}");
+    }
+    close(
+        "ktx/r8g8b8_srgb_mip.ktx",
+        "ktx2/r8g8b8a8_srgb_mip.ktx2",
+        true,
+        0.0,
+    );
+    assert_eq!(
+        read("ktx/r8g8b8_srgb_mip.ktx").source_mips.map(|m| m.len()),
+        Some(6)
+    );
+}
+
+/// A 270-texel RGB8 row is 810 bytes, padded to 812: read without the padding, every row would
+/// start two bytes later than the last and the picture would shear. Each level has its own, and
+/// the first mip has to be a halving of level 0, not of a sheared one.
+#[test]
+fn ktx_row_padding_is_skipped() {
+    let img = read("ktx/not4_r8g8b8_srgb.ktx");
+    assert_eq!((img.width, img.height), (270, 270));
+    let mips = img.source_mips.as_ref().expect("a chain");
+    assert_eq!(mips.len(), 8);
+    let (w, h) = (135usize, 135usize);
+    let at = |x: usize, y: usize, c: usize| u32::from(img.pixels[(y * 270 + x) * 4 + c]);
+    let mut boxed = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..4 {
+                let sum = at(2 * x, 2 * y, c)
+                    + at(2 * x + 1, 2 * y, c)
+                    + at(2 * x, 2 * y + 1, c)
+                    + at(2 * x + 1, 2 * y + 1, c);
+                boxed[(y * w + x) * 4 + c] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    let e = mae(&mips[0], &boxed, true);
+    println!("not4 mip 1 against a box of level 0: {e:.3}");
+    assert!(e <= 2.0, "{e:.3}");
+}
+
+/// ETC1 and the three ETC2 formats, by their GL names; ETC1 and ETC2 RGB of the same picture are
+/// alike, and the punch-through alpha punches through.
+#[test]
+fn ktx_etc_formats() {
+    for (name, label, channels) in [
+        ("ktx/etc1.ktx", "KTX ETC1", 3),
+        ("ktx/etc2_rgb.ktx", "KTX ETC2 RGB", 3),
+        ("ktx/etc2_rgba1.ktx", "KTX ETC2 RGBA1", 4),
+        ("ktx/etc2_rgba8.ktx", "KTX ETC2 RGBA", 4),
+    ] {
+        let img = read(name);
+        assert_eq!((img.source.name, img.source.channels), (label, channels));
+    }
+    let e = mae(
+        &read("ktx/etc1.ktx").pixels,
+        &read("ktx/etc2_rgb.ktx").pixels,
+        true,
+    );
+    assert!(e <= 3.0, "{e:.3}");
+    let rgba1 = read("ktx/etc2_rgba1.ktx");
+    assert!(rgba1.pixels.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
+}
+
+/// Khronos' EAC conformance images: one channel grey, two red-green, eleven bits reported, and
+/// the signed ones re-centred to use the whole range.
+#[test]
+fn ktx_eac_conformance_images() {
+    for (name, label, channels) in [
+        ("ktx/conftestimage_R11_EAC.ktx", "KTX EAC R11", 1),
+        ("ktx/conftestimage_SIGNED_R11_EAC.ktx", "KTX EAC R11", 1),
+        ("ktx/conftestimage_RG11_EAC.ktx", "KTX EAC RG11", 3),
+        ("ktx/conftestimage_SIGNED_RG11_EAC.ktx", "KTX EAC RG11", 3),
+    ] {
+        let img = read(name);
+        assert_eq!(
+            (img.source.name, img.source.channels, img.source.bit_depth),
+            (label, channels, 11),
+            "{name}"
+        );
+        let px = img.pixels.as_chunks::<4>().0;
+        let (lo, hi) = px
+            .iter()
+            .fold((255, 0), |(lo, hi), p| (p[0].min(lo), p[0].max(hi)));
+        assert_eq!((lo, hi), (0, 255), "{name}: the whole range");
+        for p in px {
+            if channels == 1 {
+                assert!(p[1] == p[0] && p[2] == p[0], "{name}: grey");
+            } else {
+                assert_eq!(p[2], 0, "{name}: no blue");
+            }
+        }
+    }
+    let l8 = read("ktx/l8_unorm_metadata.ktx");
+    assert_eq!((l8.source.name, l8.source.channels), ("KTX L8", 1));
 }
 
 /// A seven-layer array in three block formats: a 3x3 sheet each, its spare cells empty, and the

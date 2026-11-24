@@ -15,8 +15,9 @@
 use basisu::{DecodeFlags, SourceFormat, TargetFormat, Transcoder};
 use ktx2::{Header, Reader, SupercompressionScheme};
 
+use super::Dims;
 use super::image;
-use super::v2::{Dims, orientation};
+use super::v2::orientation;
 use crate::texture::{self, Shape};
 use crate::{Cx, DecodeError, DecodedImage, PixelFormat, level_dims};
 

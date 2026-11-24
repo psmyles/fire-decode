@@ -30,19 +30,103 @@
 //! as stored, as DDS is.
 
 pub(crate) mod basis;
+pub(crate) mod v1;
 pub(crate) mod v2;
 
 use crate::PixelFormat::{Rgba8Unorm, Rgba16Float, Rgba16Unorm, Rgba32Float};
 use crate::texture::{Block, Format, Mobile, Plain, masked};
-use crate::{DecodedImage, SheetKind, SheetLayout, SourceInfo};
+use crate::{DecodeError, DecodedImage, SheetKind, SheetLayout, SourceInfo};
 
 /// Which container a format is named for: its status-bar label says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Container {
-    // KTX (v1): its reader arrives after KTX2's.
-    #[allow(dead_code)]
     V1,
     V2,
+}
+
+impl Container {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Container::V1 => "KTX",
+            Container::V2 => "KTX2",
+        }
+    }
+
+    /// The `Malformed` a file of this container earns, prefixed with its name.
+    pub(crate) fn malformed(self, what: impl std::fmt::Display) -> DecodeError {
+        DecodeError::Malformed(format!("{}: {what}", self.name()))
+    }
+}
+
+/// The shape a header gives, with its zeros made ones.
+pub(crate) struct Dims {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) depth: u32,
+    pub(crate) layers: u32,
+    pub(crate) faces: u32,
+    /// The levels stored, at least 1 and never more than the dimensions can halve to.
+    pub(crate) levels: u32,
+}
+
+impl Dims {
+    /// A header's shape, checked for what both containers allow: a width, one or six faces,
+    /// square cubemap faces with no depth, and no arrays of volumes (which neither OpenGL nor
+    /// Vulkan has an image type for). A zero height, depth or layer count means one (a 1D or 2D
+    /// texture, or no array), and a level count of zero means the one level stored.
+    pub(crate) fn new(
+        c: Container,
+        width: u32,
+        height: u32,
+        depth: u32,
+        layers: u32,
+        faces: u32,
+        level_count: u32,
+    ) -> Result<Self, DecodeError> {
+        let (height, depth, layers) = (height.max(1), depth.max(1), layers.max(1));
+        if width == 0 {
+            return Err(c.malformed("a texture 0 texels wide"));
+        }
+        if faces != 1 && faces != 6 {
+            return Err(c.malformed(format_args!("a texture with {faces} faces")));
+        }
+        if faces == 6 && (width != height || depth > 1) {
+            return Err(c.malformed(format_args!(
+                "a {width}x{height}x{depth} cubemap; its faces must be square and flat"
+            )));
+        }
+        if depth > 1 && layers > 1 {
+            return Err(c.malformed("an array of volume textures"));
+        }
+        // A header may claim more levels than the dimensions can have, and a corrupt one may
+        // claim billions. Either way the chain stops where the halving reaches 1x1x1.
+        let max_levels = 32 - width.max(height).max(depth).leading_zeros();
+        Ok(Dims {
+            width,
+            height,
+            depth,
+            layers,
+            faces,
+            levels: level_count.clamp(1, max_levels),
+        })
+    }
+
+    /// How the surfaces tile into a sheet, or `None` for one surface.
+    pub(crate) fn layout(&self) -> Option<SheetLayout> {
+        layout(self.depth, self.layers, self.faces)
+    }
+
+    /// How many surfaces a level holds besides its depth slices: layers times faces.
+    pub(crate) fn surfaces(&self, c: Container) -> Result<u32, DecodeError> {
+        self.layers.checked_mul(self.faces).ok_or_else(|| {
+            DecodeError::TooLarge(format!(
+                "{} {} layers of {} faces overflow",
+                c.name(),
+                self.layers,
+                self.faces
+            ))
+        })
+    }
 }
 
 /// A literal label for `c`: `label!(c, "BC7")` is `"KTX BC7"` or `"KTX2 BC7"`.
